@@ -6,5 +6,5 @@ pub mod project;
 pub mod resolver;
 
 // Re-export main types
-pub use processor::{process_projects, ProjectResult};
+pub use processor::{ProjectResult, process_projects};
 pub use project::Project;
