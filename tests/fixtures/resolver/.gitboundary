@@ -1,0 +1,2 @@
+# This file creates a boundary for git repository detection in tests
+# It prevents find_repo_root from walking up beyond the fixtures directory
