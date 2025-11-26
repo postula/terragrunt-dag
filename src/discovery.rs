@@ -61,6 +61,7 @@ mod tests {
     #[case::single_project("single_project", vec!["."])]
     #[case::nested_projects("nested_projects", vec!["live/prod/app", "live/prod/vpc", "live/staging/vpc"])]
     #[case::with_ignored_dirs("with_ignored_dirs", vec!["vpc"])]
+    #[case::terragrunt_infrastructure_live_example("terragrunt_infrastructure_live_example", vec!["non-prod/us-east-1/qa/mysql", "non-prod/us-east-1/qa/webserver-cluster", "non-prod/us-east-1/stage/mysql", "non-prod/us-east-1/stage/webserver-cluster", "prod/us-east-1/prod/mysql", "prod/us-east-1/prod/webserver-cluster"])]
     #[case::no_projects("no_projects", vec![])]
     fn test_discover_projects(#[case] fixture: &str, #[case] expected: Vec<&str>) {
         let root = fixture_path(fixture);
@@ -81,6 +82,7 @@ mod tests {
 
         assert_eq!(result, expected);
     }
+
     #[test]
     fn test_nonexistent_path_returns_error() {
         let result = discover_projects(Utf8Path::new("/does/not/exist"));
