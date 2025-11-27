@@ -249,9 +249,16 @@ mod tests {
 
     /// Normalize a path to use forward slashes for cross-platform test assertions.
     /// This allows tests to compare paths consistently on both Unix and Windows.
+    /// Also strips Windows drive letters (e.g., "C:" or "D:") from absolute paths.
     #[cfg(test)]
     fn normalize_slashes(path: &Utf8Path) -> String {
-        path.as_str().replace('\\', "/")
+        let s = path.as_str().replace('\\', "/");
+        // Strip Windows drive letter prefix (e.g., "C:" or "D:")
+        if s.len() >= 2 && s.chars().nth(1) == Some(':') {
+            s[2..].to_string()
+        } else {
+            s
+        }
     }
 
     // ============== Literal path resolution ==============
