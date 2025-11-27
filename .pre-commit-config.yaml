@@ -6,7 +6,7 @@
 repos:
   # General file cleanup
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -14,7 +14,6 @@ repos:
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: check-toml
-
   # Rust formatting
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
@@ -23,25 +22,23 @@ repos:
         name: cargo fmt
         description: Run cargo fmt on Rust code
         args: ['--manifest-path', 'Cargo.toml', '--']
-
       - id: clippy
         name: cargo clippy
         description: Run cargo clippy for linting
         args: ['--manifest-path', 'Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings']
-
       - id: cargo-check
         name: cargo check
         description: Run cargo check to verify compilation
         args: ['--manifest-path', 'Cargo.toml', '--all-features']
 
-  # Run tests (commented out by default as it can be slow)
-  # Uncomment if you want tests to run on every commit
-  # - repo: local
-  #   hooks:
-  #     - id: cargo-test
-  #       name: cargo test
-  #       description: Run cargo test
-  #       entry: cargo test --all-features
-  #       language: system
-  #       types: [rust]
-  #       pass_filenames: false
+# Run tests (commented out by default as it can be slow)
+# Uncomment if you want tests to run on every commit
+# - repo: local
+#   hooks:
+#     - id: cargo-test
+#       name: cargo test
+#       description: Run cargo test
+#       entry: cargo test --all-features
+#       language: system
+#       types: [rust]
+#       pass_filenames: false
