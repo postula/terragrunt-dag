@@ -224,8 +224,27 @@ pub fn find_repo_root(from: &Utf8Path) -> Option<Utf8PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    /// Ensure test fixtures are set up (creates .git directories that git won't track)
+    fn setup_fixtures() {
+        INIT.call_once(|| {
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            let resolver_fixtures = std::path::Path::new(manifest_dir)
+                .join("tests/fixtures/resolver");
+
+            // Create .git directory for repo fixture
+            let repo_git = resolver_fixtures.join("repo/.git");
+            if !repo_git.exists() {
+                std::fs::create_dir_all(&repo_git).ok();
+            }
+        });
+    }
 
     fn fixture_path(name: &str) -> Utf8PathBuf {
+        setup_fixtures();
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         Utf8PathBuf::from(manifest_dir)
             .join("tests/fixtures/resolver")
