@@ -214,6 +214,8 @@ struct AtlantisProject {
     terraform_version: Option<String>,
     workflow: String,
     autoplan: AtlantisAutoplan,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
     execution_order_group: u32,
 }
 
@@ -385,6 +387,12 @@ fn generate_atlantis(projects: &[Project], config: &OutputConfig) -> Result<Stri
 
             // Get layer using internal name, default to 0 if not found
             let layer = layers.get(&p.name).copied().unwrap_or(0);
+            // Convert dependency paths to names
+            let depends_on: Vec<String> = p
+                .project_dependencies
+                .iter()
+                .map(|dep_path| dependency_path_to_name(dep_path, config.base_dir.as_deref()))
+                .collect();
 
             AtlantisProject {
                 name: name.clone(),
@@ -397,6 +405,7 @@ fn generate_atlantis(projects: &[Project], config: &OutputConfig) -> Result<Stri
                     when_modified,
                     enabled: config.autoplan_enabled,
                 },
+                depends_on,
                 execution_order_group: layer,
             }
         })
@@ -617,6 +626,22 @@ mod tests {
         let patterns: Vec<&str> = when_modified.iter().filter_map(|v| v.as_str()).collect();
 
         assert!(patterns.iter().any(|p| p.contains("root.hcl")));
+    }
+
+    #[test]
+    fn test_output_atlantis_depends_on() {
+        let projects = sample_projects();
+        let config = OutputConfig::default();
+
+        let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+
+        let depends_on = parsed["projects"][0]["depends_on"].as_sequence();
+        assert!(depends_on.is_some());
+        assert_eq!(depends_on.unwrap().len(), 1);
+
+        let depends_on_2 = parsed["projects"][1]["depends_on"].as_sequence().unwrap();
+        assert_eq!(depends_on_2.len(), 2);
     }
 
     // ============== Digger Output Tests ==============
