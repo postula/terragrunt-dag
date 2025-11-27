@@ -1,0 +1,32 @@
+# Build artifacts
+target/
+*.swp
+*.swo
+
+# Git
+.git/
+.github/
+.gitignore
+
+# CI/CD
+.travis.yml
+.gitlab-ci.yml
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Documentation
+README.md
+CLAUDE.md
+*.md
+
+# Test fixtures
+tests/fixtures/
+
+# Misc
+*.log
+out.*
+.serena/
+.claude/

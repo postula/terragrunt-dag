@@ -1,5 +1,5 @@
 # Example of a valid terragrunt project using generate blocks
-# This mimics the organization.hcl pattern from ***REMOVED***/infra
+# This mimics the organization.hcl pattern from mbrella/infra
 
 terraform {}
 
