@@ -247,6 +247,13 @@ mod tests {
         Utf8PathBuf::from(manifest_dir).join("tests/fixtures/resolver").join(name)
     }
 
+    /// Normalize a path to use forward slashes for cross-platform test assertions.
+    /// This allows tests to compare paths consistently on both Unix and Windows.
+    #[cfg(test)]
+    fn normalize_slashes(path: &Utf8Path) -> String {
+        path.as_str().replace('\\', "/")
+    }
+
     // ============== Literal path resolution ==============
 
     #[test]
@@ -408,7 +415,10 @@ mod tests {
 
         let result = ctx.resolve(&path_expr);
 
-        assert_eq!(result, Some(Utf8PathBuf::from("/path/to")));
+        // Normalize both paths to forward slashes for cross-platform comparison
+        assert!(result.is_some());
+        let normalized = normalize_slashes(&result.unwrap());
+        assert_eq!(normalized, "/path/to");
     }
 
     #[test]
@@ -492,8 +502,10 @@ mod tests {
         // The result should contain the full interpolated path
         assert!(result.is_some());
         let resolved = result.unwrap();
-        assert!(resolved.as_str().contains("/config/"));
-        assert!(resolved.as_str().ends_with(".yaml"));
+        // Normalize to forward slashes for cross-platform comparison
+        let normalized = normalize_slashes(&resolved);
+        assert!(normalized.contains("/config/"));
+        assert!(normalized.ends_with(".yaml"));
     }
 
     #[test]
@@ -578,7 +590,9 @@ mod tests {
 
         assert!(result.is_some());
         let resolved = result.unwrap();
-        assert!(resolved.as_str().contains("/modules/"));
+        // Normalize to forward slashes for cross-platform comparison
+        let normalized = normalize_slashes(&resolved);
+        assert!(normalized.contains("/modules/"));
     }
 
     #[test]
