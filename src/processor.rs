@@ -221,16 +221,19 @@ pub fn process_project_with_deps(
 
 /// Recursively load a config file and collect its dependencies.
 ///
-/// This function resolves dependencies immediately using the correct context
-/// (the directory of the file being processed), ensuring proper path resolution
-/// for dependencies from included files.
+/// This function resolves dependencies immediately using the correct context:
+/// - Relative paths are resolved from the config file's directory (config_dir)
+/// - find_in_parent_folders uses the original project directory (project_dir)
+///
+/// This matches terragrunt's behavior where included configs use the project's
+/// context for parent folder lookups.
 fn load_config_recursive(
     config_path: &Utf8Path,
-    base_dir: &Utf8Path, // Directory for relative path resolution
-    visited: &mut std::collections::HashSet<Utf8PathBuf>, // Still needed for cycle detection in THIS recursion
-    cache: &ParseCache,                                   // Shared cache across all projects
-    project_dependencies: &mut Vec<String>,               // Resolved project dependencies
-    watch_files: &mut Vec<Utf8PathBuf>,                   // Resolved watch files
+    project_dir: &Utf8Path, // Original project directory (for find_in_parent_folders)
+    visited: &mut std::collections::HashSet<Utf8PathBuf>, // For cycle detection
+    cache: &ParseCache,     // Shared cache across all projects
+    project_dependencies: &mut Vec<String>, // Resolved project dependencies
+    watch_files: &mut Vec<Utf8PathBuf>, // Resolved watch files
 ) -> Result<(), ProcessError> {
     use crate::parser::DependencyKind;
     use crate::resolver::ResolveContext;
@@ -255,10 +258,11 @@ fn load_config_recursive(
     // Use cache instead of direct parsing
     let deps = cache.get_or_parse(config_path)?;
 
-    // Create resolver context for this file's directory
-    // This ensures deps from this file are resolved relative to THIS file's location
-    let config_dir = config_path.parent().unwrap_or(base_dir);
-    let ctx = ResolveContext::new(config_dir.to_path_buf());
+    // Create resolver context:
+    // - config_dir: the current file's directory (for relative path resolution)
+    // - project_dir: the original project directory (for find_in_parent_folders)
+    let config_dir = config_path.parent().unwrap_or(project_dir).to_path_buf();
+    let ctx = ResolveContext::for_included_config(config_dir.clone(), project_dir.to_path_buf());
 
     // Process each dependency
     for dep in deps {
@@ -270,10 +274,10 @@ fn load_config_recursive(
                     watch_files.push(resolved.clone());
 
                     // Recursively load the referenced config
-                    let referenced_dir = resolved.parent().unwrap_or(config_dir);
+                    // Pass the SAME project_dir to preserve find_in_parent_folders context
                     load_config_recursive(
                         &resolved,
-                        referenced_dir,
+                        project_dir, // Keep original project dir!
                         visited,
                         cache,
                         project_dependencies,
@@ -282,14 +286,14 @@ fn load_config_recursive(
                 }
             }
             DependencyKind::Project => {
-                // Resolve NOW with correct context (this file's directory)
+                // Resolve NOW with correct context
                 if let Some(resolved) = ctx.resolve(&dep.path) {
-                    let dep_name = derive_dependency_name(&resolved, base_dir);
+                    let dep_name = derive_dependency_name(&resolved, project_dir);
                     project_dependencies.push(dep_name);
                 }
             }
             DependencyKind::TerraformSource | DependencyKind::FileRead => {
-                // Resolve NOW with correct context (this file's directory)
+                // Resolve NOW with correct context
                 if let Some(resolved) = ctx.resolve(&dep.path) {
                     watch_files.push(resolved);
                 }

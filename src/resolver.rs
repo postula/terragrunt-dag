@@ -7,7 +7,10 @@ use crate::parser::PathExpr;
 
 /// Resolution context - provides base paths for resolution
 pub struct ResolveContext {
-    /// The directory containing the current terragrunt.hcl
+    /// The directory containing the current config file (for relative paths)
+    pub config_dir: Utf8PathBuf,
+    /// The original project directory (for find_in_parent_folders)
+    /// This is the directory where the main terragrunt.hcl is located
     pub project_dir: Utf8PathBuf,
     /// Cached repo root (lazily computed)
     repo_root: OnceCell<Option<Utf8PathBuf>>,
@@ -17,6 +20,17 @@ impl ResolveContext {
     /// Create a new resolution context for a project directory
     pub fn new(project_dir: Utf8PathBuf) -> Self {
         Self {
+            config_dir: project_dir.clone(),
+            project_dir,
+            repo_root: OnceCell::new(),
+        }
+    }
+
+    /// Create a context for an included config file
+    /// Uses config_dir for relative paths but project_dir for find_in_parent_folders
+    pub fn for_included_config(config_dir: Utf8PathBuf, project_dir: Utf8PathBuf) -> Self {
+        Self {
+            config_dir,
             project_dir,
             repo_root: OnceCell::new(),
         }
@@ -27,12 +41,14 @@ impl ResolveContext {
     pub fn resolve(&self, path_expr: &PathExpr) -> Option<Utf8PathBuf> {
         match path_expr {
             PathExpr::Literal(path) => {
-                // Join with project dir and normalize
-                let resolved = self.project_dir.join(path);
+                // Join with config dir (current file's location) and normalize
+                let resolved = self.config_dir.join(path);
                 Some(normalize_path(&resolved))
             }
 
             PathExpr::FindInParentFolders(filename) => {
+                // Use PROJECT dir (original terragrunt.hcl location) for find_in_parent_folders
+                // This matches terragrunt behavior where includes use the project's context
                 let filename = filename.as_deref().unwrap_or("terragrunt.hcl");
                 find_in_parent_folders(&self.project_dir, filename)
             }
@@ -51,9 +67,64 @@ impl ResolveContext {
                 None
             }
 
-            PathExpr::Interpolation(_parts) => {
-                // String interpolation is complex - skip for now
-                None
+            PathExpr::Dirname(inner) => {
+                // Resolve the inner expression first, then get its parent directory
+                let resolved = self.resolve(inner)?;
+                resolved.parent().map(|p| p.to_path_buf())
+            }
+
+            PathExpr::Format { fmt, args } => {
+                // Resolve all arguments first
+                let resolved_args: Vec<String> = args
+                    .iter()
+                    .map(|arg| self.resolve(arg).map(|p| p.to_string()))
+                    .collect::<Option<Vec<_>>>()?;
+
+                // Replace %s placeholders with resolved arguments
+                let mut result = fmt.clone();
+                for arg in resolved_args {
+                    // Replace first occurrence of %s with the argument
+                    if let Some(pos) = result.find("%s") {
+                        result.replace_range(pos..pos + 2, &arg);
+                    }
+                }
+
+                // Parse result as a path and normalize
+                let path = Utf8PathBuf::from(result);
+                Some(normalize_path(&path))
+            }
+
+            PathExpr::Interpolation(parts) => {
+                // Resolve each part and concatenate them
+                // IMPORTANT: Literals within interpolations are string fragments,
+                // not full paths to be resolved. Only function calls get resolved.
+                if parts.is_empty() {
+                    return None;
+                }
+
+                let mut result = String::new();
+
+                for part in parts {
+                    match part {
+                        // Literals in interpolation are string fragments - use as-is
+                        PathExpr::Literal(s) => {
+                            result.push_str(s);
+                        }
+                        // Other expressions need to be resolved
+                        _ => match self.resolve(part) {
+                            Some(resolved) => {
+                                result.push_str(resolved.as_str());
+                            }
+                            None => {
+                                return None;
+                            }
+                        },
+                    }
+                }
+
+                // Parse the concatenated result as a path and normalize it
+                let path = Utf8PathBuf::from(result);
+                Some(normalize_path(&path))
             }
 
             PathExpr::Unresolvable { .. } => {
@@ -313,5 +384,219 @@ mod tests {
         let result = find_repo_root(&from);
 
         assert_eq!(result, Some(fixture_path("repo")));
+    }
+
+    // ============== dirname() function ==============
+
+    #[test]
+    fn test_resolve_dirname_of_literal() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        let path_expr =
+            PathExpr::Dirname(Box::new(PathExpr::Literal("/path/to/file.hcl".to_string())));
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, Some(Utf8PathBuf::from("/path/to")));
+    }
+
+    #[test]
+    fn test_resolve_dirname_of_find_in_parent_folders() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // dirname(find_in_parent_folders("root.hcl"))
+        let path_expr = PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some(
+            "root.hcl".to_string(),
+        ))));
+
+        let result = ctx.resolve(&path_expr);
+
+        // find_in_parent_folders("root.hcl") resolves to repo/root.hcl
+        // dirname of that is repo/
+        assert_eq!(result, Some(fixture_path("repo")));
+    }
+
+    #[test]
+    fn test_resolve_dirname_unresolvable_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // dirname of something that can't be resolved should return None
+        let path_expr = PathExpr::Dirname(Box::new(PathExpr::Unresolvable {
+            func: "get_env()".to_string(),
+        }));
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, None);
+    }
+
+    // ============== Interpolation tests ==============
+
+    #[test]
+    fn test_resolve_interpolation_simple() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir.clone());
+
+        // "${get_repo_root()}/modules/vpc"
+        let path_expr = PathExpr::Interpolation(vec![
+            PathExpr::GetRepoRoot,
+            PathExpr::Literal("/modules/vpc".to_string()),
+        ]);
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, Some(fixture_path("repo/modules/vpc")));
+    }
+
+    #[test]
+    fn test_resolve_interpolation_with_dirname() {
+        let project_dir = fixture_path("repo_with_template/live/prod/app");
+        let ctx = ResolveContext::new(project_dir);
+
+        // "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/service.hcl"
+        let path_expr = PathExpr::Interpolation(vec![
+            PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some(
+                "root.hcl".to_string(),
+            )))),
+            PathExpr::Literal("/_envcommon/service.hcl".to_string()),
+        ]);
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(
+            result,
+            Some(fixture_path("repo_with_template/_envcommon/service.hcl"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_interpolation_complex() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir.clone());
+
+        // "${get_repo_root()}/config/${get_terragrunt_dir()}.yaml"
+        // Should resolve to: repo/config/[project_dir].yaml
+        let path_expr = PathExpr::Interpolation(vec![
+            PathExpr::GetRepoRoot,
+            PathExpr::Literal("/config/".to_string()),
+            PathExpr::GetTerragruntDir,
+            PathExpr::Literal(".yaml".to_string()),
+        ]);
+
+        let result = ctx.resolve(&path_expr);
+
+        // The result should contain the full interpolated path
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert!(resolved.as_str().contains("/config/"));
+        assert!(resolved.as_str().ends_with(".yaml"));
+    }
+
+    #[test]
+    fn test_resolve_interpolation_with_unresolvable_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // If any part can't be resolved, the whole interpolation fails
+        let path_expr = PathExpr::Interpolation(vec![
+            PathExpr::GetRepoRoot,
+            PathExpr::Unresolvable {
+                func: "get_env()".to_string(),
+            },
+            PathExpr::Literal("/config.yaml".to_string()),
+        ]);
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_interpolation_empty_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // Empty interpolation should return None
+        let path_expr = PathExpr::Interpolation(vec![]);
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, None);
+    }
+
+    // ============== format() function tests ==============
+
+    #[test]
+    fn test_resolve_format_simple() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // format("%s/alarm_topic", get_repo_root())
+        let path_expr = PathExpr::Format {
+            fmt: "%s/alarm_topic".to_string(),
+            args: vec![PathExpr::GetRepoRoot],
+        };
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, Some(fixture_path("repo/alarm_topic")));
+    }
+
+    #[test]
+    fn test_resolve_format_with_dirname() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // format("%s/alarm_topic", dirname(find_in_parent_folders("root.hcl")))
+        let path_expr = PathExpr::Format {
+            fmt: "%s/alarm_topic".to_string(),
+            args: vec![PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(
+                Some("root.hcl".to_string()),
+            )))],
+        };
+
+        let result = ctx.resolve(&path_expr);
+
+        // dirname(find_in_parent_folders("root.hcl")) = dirname(repo/root.hcl) = repo
+        assert_eq!(result, Some(fixture_path("repo/alarm_topic")));
+    }
+
+    #[test]
+    fn test_resolve_format_multiple_args() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir.clone());
+
+        // format("%s/modules/%s", get_repo_root(), get_terragrunt_dir())
+        let path_expr = PathExpr::Format {
+            fmt: "%s/modules/%s".to_string(),
+            args: vec![PathExpr::GetRepoRoot, PathExpr::GetTerragruntDir],
+        };
+
+        let result = ctx.resolve(&path_expr);
+
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert!(resolved.as_str().contains("/modules/"));
+    }
+
+    #[test]
+    fn test_resolve_format_with_unresolvable_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // If any argument can't be resolved, the whole format fails
+        let path_expr = PathExpr::Format {
+            fmt: "%s/alarm_topic".to_string(),
+            args: vec![PathExpr::Unresolvable {
+                func: "get_env()".to_string(),
+            }],
+        };
+
+        let result = ctx.resolve(&path_expr);
+
+        assert_eq!(result, None);
     }
 }

@@ -28,6 +28,11 @@ pub enum PathExpr {
     PathRelativeToInclude,
     /// path_relative_from_include()
     PathRelativeFromInclude,
+    /// dirname(path) - extract parent directory
+    Dirname(Box<PathExpr>),
+    /// format(fmt_string, args...) - sprintf-like string formatting
+    /// First element is the format string, rest are arguments
+    Format { fmt: String, args: Vec<PathExpr> },
     /// String interpolation: "${get_repo_root()}/modules/vpc"
     Interpolation(Vec<PathExpr>),
     /// Function we can't evaluate
@@ -376,6 +381,42 @@ fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
                 "get_parent_terragrunt_dir" => PathExpr::GetParentTerragruntDir,
                 "path_relative_to_include" => PathExpr::PathRelativeToInclude,
                 "path_relative_from_include" => PathExpr::PathRelativeFromInclude,
+                "dirname" => {
+                    // dirname(path) - extract the first argument and wrap it
+                    if let Some(arg) = func_call.args.first() {
+                        PathExpr::Dirname(Box::new(extract_path_expr(arg)))
+                    } else {
+                        PathExpr::Unresolvable {
+                            func: "dirname with no arguments".to_string(),
+                        }
+                    }
+                }
+                "format" => {
+                    // format(fmt_string, arg1, arg2, ...) - sprintf-like formatting
+                    // First argument should be a format string with %s placeholders
+                    let mut args_iter = func_call.args.iter();
+
+                    // Get the format string (first argument)
+                    if let Some(fmt_arg) = args_iter.next() {
+                        if let hcl::Expression::String(fmt) = fmt_arg {
+                            // Collect remaining arguments as PathExprs
+                            let args: Vec<PathExpr> = args_iter.map(extract_path_expr).collect();
+                            PathExpr::Format {
+                                fmt: fmt.clone(),
+                                args,
+                            }
+                        } else {
+                            // Format string is not a literal - try template expression
+                            PathExpr::Unresolvable {
+                                func: "format with non-literal format string".to_string(),
+                            }
+                        }
+                    } else {
+                        PathExpr::Unresolvable {
+                            func: "format with no arguments".to_string(),
+                        }
+                    }
+                }
                 _ => PathExpr::Unresolvable {
                     func: func_name.to_string(),
                 },
@@ -384,17 +425,66 @@ fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
 
         hcl::Expression::TemplateExpr(template) => {
             // Template expressions like "${get_repo_root()}/modules/vpc"
-            // For now, mark as Unresolvable but with the template string
-            // We could parse this more deeply in the future
-            PathExpr::Unresolvable {
-                func: format!("template:{}", template),
-            }
+            // Parse the template into an Interpolation with multiple parts
+            extract_template_expr(template)
         }
 
         // For other expressions, mark as unresolvable
         _ => PathExpr::Unresolvable {
             func: format!("{:?}", expr),
         },
+    }
+}
+
+/// Extract a template expression into an Interpolation PathExpr.
+/// Templates consist of literal strings and interpolated expressions: "${expr}".
+fn extract_template_expr(template_expr: &hcl::expr::TemplateExpr) -> PathExpr {
+    // Parse the TemplateExpr into a Template
+    let template = match hcl::Template::from_expr(template_expr) {
+        Ok(t) => t,
+        Err(_) => {
+            // If parsing fails, mark as unresolvable
+            return PathExpr::Unresolvable {
+                func: format!("template parse error: {}", template_expr),
+            };
+        }
+    };
+
+    let mut parts = Vec::new();
+
+    // Template has elements() method that returns &[Element]
+    for element in template.elements() {
+        match element {
+            hcl::template::Element::Literal(s) => {
+                // Only add non-empty literals
+                if !s.is_empty() {
+                    parts.push(PathExpr::Literal(s.clone()));
+                }
+            }
+            hcl::template::Element::Interpolation(interp) => {
+                // Interpolation has an expr field (not a method)
+                parts.push(extract_path_expr(&interp.expr));
+            }
+            hcl::template::Element::Directive(_) => {
+                // Directives (%{...}) are not supported for path expressions
+                parts.push(PathExpr::Unresolvable {
+                    func: "template directive".to_string(),
+                });
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        // Empty template - shouldn't happen but handle it
+        PathExpr::Unresolvable {
+            func: "empty template".to_string(),
+        }
+    } else if parts.len() == 1 {
+        // Single part - unwrap it (optimization)
+        parts.into_iter().next().unwrap()
+    } else {
+        // Multiple parts - this is an interpolation
+        PathExpr::Interpolation(parts)
     }
 }
 
@@ -887,5 +977,188 @@ mod tests {
         let paths: Vec<&PathExpr> = config.deps.iter().map(|d| &d.path).collect();
         assert!(paths.contains(&&PathExpr::Literal("../base.yaml".to_string())));
         assert!(paths.contains(&&PathExpr::Literal("../override.yaml".to_string())));
+    }
+
+    // ============== Template expression tests ==============
+
+    #[test]
+    fn test_parse_include_template_expr_with_dirname() {
+        let path = fixture_path("include_template_expr");
+        let config = parse_terragrunt_file(&path).expect("should parse successfully");
+
+        assert_eq!(config.deps.len(), 1);
+
+        let dep = &config.deps[0];
+        assert_eq!(dep.kind, DependencyKind::Include);
+        assert_eq!(dep.name, Some("envcommon".to_string()));
+
+        // The path should be an Interpolation with two parts:
+        // 1. Dirname(FindInParentFolders("root.hcl"))
+        // 2. Literal("/_envcommon/service.hcl")
+        match &dep.path {
+            PathExpr::Interpolation(parts) => {
+                assert_eq!(parts.len(), 2);
+
+                // First part: dirname(find_in_parent_folders("root.hcl"))
+                match &parts[0] {
+                    PathExpr::Dirname(inner) => match &**inner {
+                        PathExpr::FindInParentFolders(Some(filename)) => {
+                            assert_eq!(filename, "root.hcl");
+                        }
+                        _ => panic!("Expected FindInParentFolders inside Dirname"),
+                    },
+                    _ => panic!("Expected Dirname as first part"),
+                }
+
+                // Second part: literal "/_envcommon/service.hcl"
+                assert_eq!(
+                    parts[1],
+                    PathExpr::Literal("/_envcommon/service.hcl".to_string())
+                );
+            }
+            _ => panic!("Expected Interpolation, got {:?}", dep.path),
+        }
+    }
+
+    #[test]
+    fn test_extract_path_expr_template_simple() {
+        // Test direct extraction of a simple template expression
+        let hcl_str = r#"test = "${get_repo_root()}/modules/vpc""#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        match path_expr {
+            PathExpr::Interpolation(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], PathExpr::GetRepoRoot);
+                assert_eq!(parts[1], PathExpr::Literal("/modules/vpc".to_string()));
+            }
+            _ => panic!("Expected Interpolation, got {:?}", path_expr),
+        }
+    }
+
+    #[test]
+    fn test_extract_path_expr_template_complex() {
+        // Test a more complex template with nested functions
+        let hcl_str = r#"test = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/${get_terragrunt_dir()}.hcl""#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        match path_expr {
+            PathExpr::Interpolation(parts) => {
+                assert_eq!(parts.len(), 4);
+
+                // First: dirname(find_in_parent_folders("root.hcl"))
+                match &parts[0] {
+                    PathExpr::Dirname(inner) => match &**inner {
+                        PathExpr::FindInParentFolders(Some(f)) => assert_eq!(f, "root.hcl"),
+                        _ => panic!("Expected FindInParentFolders in Dirname"),
+                    },
+                    _ => panic!("Expected Dirname"),
+                }
+
+                // Second: literal "/_envcommon/"
+                assert_eq!(parts[1], PathExpr::Literal("/_envcommon/".to_string()));
+
+                // Third: get_terragrunt_dir()
+                assert_eq!(parts[2], PathExpr::GetTerragruntDir);
+
+                // Fourth: literal ".hcl"
+                assert_eq!(parts[3], PathExpr::Literal(".hcl".to_string()));
+            }
+            _ => panic!("Expected Interpolation, got {:?}", path_expr),
+        }
+    }
+
+    #[test]
+    fn test_extract_path_expr_dirname_standalone() {
+        // Test extraction of dirname as a standalone function call
+        let hcl_str = r#"test = dirname("/path/to/file.hcl")"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        match path_expr {
+            PathExpr::Dirname(inner) => {
+                assert_eq!(*inner, PathExpr::Literal("/path/to/file.hcl".to_string()));
+            }
+            _ => panic!("Expected Dirname, got {:?}", path_expr),
+        }
+    }
+
+    // ============== format() function tests ==============
+
+    #[test]
+    fn test_extract_path_expr_format_simple() {
+        // format("%s/alarm_topic", dirname(find_in_parent_folders("env.hcl")))
+        let hcl_str =
+            r#"test = format("%s/alarm_topic", dirname(find_in_parent_folders("env.hcl")))"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        match path_expr {
+            PathExpr::Format { fmt, args } => {
+                assert_eq!(fmt, "%s/alarm_topic");
+                assert_eq!(args.len(), 1);
+
+                // First arg should be dirname(find_in_parent_folders("env.hcl"))
+                match &args[0] {
+                    PathExpr::Dirname(inner) => match &**inner {
+                        PathExpr::FindInParentFolders(Some(filename)) => {
+                            assert_eq!(filename, "env.hcl");
+                        }
+                        _ => panic!("Expected FindInParentFolders inside Dirname"),
+                    },
+                    _ => panic!("Expected Dirname as first arg"),
+                }
+            }
+            _ => panic!("Expected Format, got {:?}", path_expr),
+        }
+    }
+
+    #[test]
+    fn test_extract_path_expr_format_with_get_repo_root() {
+        // format("%s/aws/_modules/cloudtrail", get_repo_root())
+        let hcl_str = r#"test = format("%s/aws/_modules/cloudtrail", get_repo_root())"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        match path_expr {
+            PathExpr::Format { fmt, args } => {
+                assert_eq!(fmt, "%s/aws/_modules/cloudtrail");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], PathExpr::GetRepoRoot);
+            }
+            _ => panic!("Expected Format, got {:?}", path_expr),
+        }
+    }
+
+    #[test]
+    fn test_extract_path_expr_format_multiple_args() {
+        // format("%s/%s/config.hcl", get_repo_root(), get_terragrunt_dir())
+        let hcl_str = r#"test = format("%s/%s/config.hcl", get_repo_root(), get_terragrunt_dir())"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        match path_expr {
+            PathExpr::Format { fmt, args } => {
+                assert_eq!(fmt, "%s/%s/config.hcl");
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], PathExpr::GetRepoRoot);
+                assert_eq!(args[1], PathExpr::GetTerragruntDir);
+            }
+            _ => panic!("Expected Format, got {:?}", path_expr),
+        }
     }
 }
