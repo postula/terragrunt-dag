@@ -1,18 +1,14 @@
 name: Release
-
 on:
   push:
     tags:
       - "v*.*.*"
   workflow_dispatch:
-
 env:
   CARGO_TERM_COLOR: always
-
 permissions:
   contents: write
   pull-requests: write
-
 jobs:
   create-release:
     name: Create Release
@@ -24,10 +20,9 @@ jobs:
       - name: Get version from tag
         id: get_version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
         with:
           name: Release v${{ steps.get_version.outputs.version }}
           draft: false
@@ -35,7 +30,6 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   build-release:
     name: Build ${{ matrix.target }}
     needs: create-release
@@ -48,50 +42,41 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
-
           # Linux x86_64 (musl, static)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
             cross: true
-
           # Linux aarch64 (glibc)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
             cross: true
-
           # Linux aarch64 (musl, static)
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
             cross: true
-
           # macOS x86_64
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
-
           # macOS aarch64 (Apple Silicon)
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
           toolchain: stable
           target: ${{ matrix.target }}
           cache: true
-
       - name: Install cross (for cross-compilation)
         if: matrix.cross
         run: cargo install cross
-
       - name: Build release binary
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
@@ -100,7 +85,6 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
         shell: bash
-
       - name: Prepare binary (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
@@ -114,9 +98,8 @@ jobs:
             shasum -a 256 "terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz" > "terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256"
           fi
         shell: bash
-
       - name: Upload release archive
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
         with:
           files: |
             terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
