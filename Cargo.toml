@@ -22,7 +22,7 @@
 
   [dependencies.dashmap]
     features = ["rayon"]
-    version = "6"
+    version = "6.1.0"
 
   [dependencies.serde]
     features = ["derive"]
