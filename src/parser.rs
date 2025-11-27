@@ -32,11 +32,16 @@ pub enum PathExpr {
     Dirname(Box<PathExpr>),
     /// format(fmt_string, args...) - sprintf-like string formatting
     /// First element is the format string, rest are arguments
-    Format { fmt: String, args: Vec<PathExpr> },
+    Format {
+        fmt: String,
+        args: Vec<PathExpr>,
+    },
     /// String interpolation: "${get_repo_root()}/modules/vpc"
     Interpolation(Vec<PathExpr>),
     /// Function we can't evaluate
-    Unresolvable { func: String },
+    Unresolvable {
+        func: String,
+    },
 }
 
 /// What kind of dependency is this
@@ -79,8 +84,7 @@ pub struct TerragruntConfig {
 /// Parse a terragrunt.hcl file
 pub fn parse_terragrunt_file(path: &camino::Utf8Path) -> Result<TerragruntConfig, ParseError> {
     let content = std::fs::read_to_string(path)?;
-    let body: hcl::Body =
-        hcl::from_str(&content).map_err(|e| ParseError::HclError(e.to_string()))?;
+    let body: hcl::Body = hcl::from_str(&content).map_err(|e| ParseError::HclError(e.to_string()))?;
 
     let mut config = TerragruntConfig::default();
 
@@ -134,14 +138,10 @@ fn extract_dependency_block(block: &hcl::Block) -> Option<ExtractedDep> {
         .map(|attr| extract_path_expr(attr.expr()))?;
 
     // Get enabled attribute if present
-    let enabled = block
-        .body()
-        .attributes()
-        .find(|attr| attr.key() == "enabled")
-        .and_then(|attr| match attr.expr() {
-            hcl::Expression::Bool(b) => Some(*b),
-            _ => None,
-        });
+    let enabled = block.body().attributes().find(|attr| attr.key() == "enabled").and_then(|attr| match attr.expr() {
+        hcl::Expression::Bool(b) => Some(*b),
+        _ => None,
+    });
 
     Some(ExtractedDep {
         kind: DependencyKind::Project,
@@ -183,11 +183,8 @@ fn extract_include_block(block: &hcl::Block) -> Option<ExtractedDep> {
     let name = block.labels().first().map(|l| l.as_str().to_string());
 
     // Get path attribute
-    let path_expr = block
-        .body()
-        .attributes()
-        .find(|attr| attr.key() == "path")
-        .map(|attr| extract_path_expr(attr.expr()))?;
+    let path_expr =
+        block.body().attributes().find(|attr| attr.key() == "path").map(|attr| extract_path_expr(attr.expr()))?;
 
     Some(ExtractedDep {
         kind: DependencyKind::Include,
@@ -201,10 +198,7 @@ fn extract_include_block(block: &hcl::Block) -> Option<ExtractedDep> {
 /// Only extracts LOCAL sources - remote sources (git::, tfr://, github.com/) are ignored.
 fn extract_terraform_block(block: &hcl::Block) -> Option<ExtractedDep> {
     // Get source attribute
-    let source_attr = block
-        .body()
-        .attributes()
-        .find(|attr| attr.key() == "source")?;
+    let source_attr = block.body().attributes().find(|attr| attr.key() == "source")?;
 
     let path_expr = extract_path_expr(source_attr.expr());
 
@@ -501,10 +495,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> Utf8PathBuf {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        Utf8PathBuf::from(manifest_dir)
-            .join("tests/fixtures/parser")
-            .join(name)
-            .join("terragrunt.hcl")
+        Utf8PathBuf::from(manifest_dir).join("tests/fixtures/parser").join(name).join("terragrunt.hcl")
     }
 
     #[test]
@@ -576,18 +567,12 @@ mod tests {
         assert_eq!(named_deps.len(), 2);
 
         // Find the "vpc" dependency
-        let vpc = named_deps
-            .iter()
-            .find(|d| d.name == Some("vpc".to_string()))
-            .unwrap();
+        let vpc = named_deps.iter().find(|d| d.name == Some("vpc".to_string())).unwrap();
         assert_eq!(vpc.path, PathExpr::Literal("../vpc".to_string()));
         assert_eq!(vpc.enabled, None);
 
         // Find the "sg" dependency (disabled)
-        let sg = named_deps
-            .iter()
-            .find(|d| d.name == Some("sg".to_string()))
-            .unwrap();
+        let sg = named_deps.iter().find(|d| d.name == Some("sg".to_string())).unwrap();
         assert_eq!(sg.path, PathExpr::Literal("../sg".to_string()));
         assert_eq!(sg.enabled, Some(false));
 
@@ -636,10 +621,7 @@ mod tests {
 
         let dep = &config.deps[0];
         assert_eq!(dep.kind, DependencyKind::Include);
-        assert_eq!(
-            dep.path,
-            PathExpr::FindInParentFolders(Some("env.hcl".to_string()))
-        );
+        assert_eq!(dep.path, PathExpr::FindInParentFolders(Some("env.hcl".to_string())));
         assert_eq!(dep.name, Some("env".to_string()));
     }
 
@@ -651,37 +633,17 @@ mod tests {
         assert_eq!(config.deps.len(), 3);
 
         // All should be Include kind
-        assert!(
-            config
-                .deps
-                .iter()
-                .all(|d| d.kind == DependencyKind::Include)
-        );
+        assert!(config.deps.iter().all(|d| d.kind == DependencyKind::Include));
 
         // Find each by name
-        let root = config
-            .deps
-            .iter()
-            .find(|d| d.name == Some("root".to_string()))
-            .unwrap();
+        let root = config.deps.iter().find(|d| d.name == Some("root".to_string())).unwrap();
         assert_eq!(root.path, PathExpr::FindInParentFolders(None));
 
-        let env = config
-            .deps
-            .iter()
-            .find(|d| d.name == Some("env".to_string()))
-            .unwrap();
+        let env = config.deps.iter().find(|d| d.name == Some("env".to_string())).unwrap();
         assert_eq!(env.path, PathExpr::Literal("../env.hcl".to_string()));
 
-        let region = config
-            .deps
-            .iter()
-            .find(|d| d.name == Some("region".to_string()))
-            .unwrap();
-        assert_eq!(
-            region.path,
-            PathExpr::FindInParentFolders(Some("region.hcl".to_string()))
-        );
+        let region = config.deps.iter().find(|d| d.name == Some("region".to_string())).unwrap();
+        assert_eq!(region.path, PathExpr::FindInParentFolders(Some("region.hcl".to_string())));
     }
 
     #[test]
@@ -693,16 +655,8 @@ mod tests {
         assert_eq!(config.deps.len(), 3);
 
         // Count by kind
-        let includes: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::Include)
-            .collect();
-        let projects: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::Project)
-            .collect();
+        let includes: Vec<_> = config.deps.iter().filter(|d| d.kind == DependencyKind::Include).collect();
+        let projects: Vec<_> = config.deps.iter().filter(|d| d.kind == DependencyKind::Project).collect();
 
         assert_eq!(includes.len(), 1);
         assert_eq!(projects.len(), 2);
@@ -736,10 +690,7 @@ mod tests {
         assert_eq!(dep.kind, DependencyKind::TerraformSource);
         // This should be an interpolation or function call - for now accept either representation
         // The key is that it's NOT ignored
-        assert!(matches!(
-            dep.path,
-            PathExpr::Interpolation(_) | PathExpr::Unresolvable { .. }
-        ));
+        assert!(matches!(dep.path, PathExpr::Interpolation(_) | PathExpr::Unresolvable { .. }));
     }
 
     #[test]
@@ -778,29 +729,15 @@ mod tests {
         assert_eq!(config.deps.len(), 3);
 
         // Count by kind
-        let terraform_sources: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::TerraformSource)
-            .collect();
+        let terraform_sources: Vec<_> =
+            config.deps.iter().filter(|d| d.kind == DependencyKind::TerraformSource).collect();
         assert_eq!(terraform_sources.len(), 1);
-        assert_eq!(
-            terraform_sources[0].path,
-            PathExpr::Literal("../modules/app".to_string())
-        );
+        assert_eq!(terraform_sources[0].path, PathExpr::Literal("../modules/app".to_string()));
 
-        let includes: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::Include)
-            .collect();
+        let includes: Vec<_> = config.deps.iter().filter(|d| d.kind == DependencyKind::Include).collect();
         assert_eq!(includes.len(), 1);
 
-        let projects: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::Project)
-            .collect();
+        let projects: Vec<_> = config.deps.iter().filter(|d| d.kind == DependencyKind::Project).collect();
         assert_eq!(projects.len(), 1);
     }
 
@@ -813,10 +750,7 @@ mod tests {
         assert_eq!(config.deps.len(), 0);
 
         // But it should mark that a terraform block exists
-        assert!(
-            config.has_terraform_block,
-            "terraform block without source should still set has_terraform_block=true"
-        );
+        assert!(config.has_terraform_block, "terraform block without source should still set has_terraform_block=true");
     }
 
     #[test]
@@ -828,10 +762,7 @@ mod tests {
         assert_eq!(config.deps.len(), 1);
 
         // Should also set has_terraform_block
-        assert!(
-            config.has_terraform_block,
-            "terraform block with source should set has_terraform_block=true"
-        );
+        assert!(config.has_terraform_block, "terraform block with source should set has_terraform_block=true");
     }
 
     #[test]
@@ -841,10 +772,7 @@ mod tests {
 
         // Should have dependency but NO terraform block
         assert_eq!(config.deps.len(), 1);
-        assert!(
-            !config.has_terraform_block,
-            "config without terraform block should have has_terraform_block=false"
-        );
+        assert!(!config.has_terraform_block, "config without terraform block should have has_terraform_block=false");
     }
 
     // ============== locals block tests ==============
@@ -895,10 +823,7 @@ mod tests {
 
         let dep = &config.deps[0];
         assert_eq!(dep.kind, DependencyKind::FileRead);
-        assert_eq!(
-            dep.path,
-            PathExpr::Literal("../terraform.tfvars".to_string())
-        );
+        assert_eq!(dep.path, PathExpr::Literal("../terraform.tfvars".to_string()));
     }
 
     #[test]
@@ -910,18 +835,10 @@ mod tests {
         assert_eq!(config.deps.len(), 5);
 
         // Count by kind
-        let read_configs: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::ReadConfig)
-            .collect();
+        let read_configs: Vec<_> = config.deps.iter().filter(|d| d.kind == DependencyKind::ReadConfig).collect();
         assert_eq!(read_configs.len(), 2);
 
-        let file_reads: Vec<_> = config
-            .deps
-            .iter()
-            .filter(|d| d.kind == DependencyKind::FileRead)
-            .collect();
+        let file_reads: Vec<_> = config.deps.iter().filter(|d| d.kind == DependencyKind::FileRead).collect();
         assert_eq!(file_reads.len(), 3);
 
         // Verify specific paths
@@ -943,10 +860,7 @@ mod tests {
         let dep = &config.deps[0];
         assert_eq!(dep.kind, DependencyKind::ReadConfig);
         // The path argument is find_in_parent_folders("root.hcl")
-        assert_eq!(
-            dep.path,
-            PathExpr::FindInParentFolders(Some("root.hcl".to_string()))
-        );
+        assert_eq!(dep.path, PathExpr::FindInParentFolders(Some("root.hcl".to_string())));
     }
 
     #[test]
@@ -958,36 +872,11 @@ mod tests {
         assert_eq!(config.deps.len(), 5);
 
         // Verify we have all kinds
-        assert!(
-            config
-                .deps
-                .iter()
-                .any(|d| d.kind == DependencyKind::Include)
-        );
-        assert!(
-            config
-                .deps
-                .iter()
-                .any(|d| d.kind == DependencyKind::ReadConfig)
-        );
-        assert!(
-            config
-                .deps
-                .iter()
-                .any(|d| d.kind == DependencyKind::FileRead)
-        );
-        assert!(
-            config
-                .deps
-                .iter()
-                .any(|d| d.kind == DependencyKind::Project)
-        );
-        assert!(
-            config
-                .deps
-                .iter()
-                .any(|d| d.kind == DependencyKind::TerraformSource)
-        );
+        assert!(config.deps.iter().any(|d| d.kind == DependencyKind::Include));
+        assert!(config.deps.iter().any(|d| d.kind == DependencyKind::ReadConfig));
+        assert!(config.deps.iter().any(|d| d.kind == DependencyKind::FileRead));
+        assert!(config.deps.iter().any(|d| d.kind == DependencyKind::Project));
+        assert!(config.deps.iter().any(|d| d.kind == DependencyKind::TerraformSource));
     }
 
     #[test]
@@ -1007,12 +896,7 @@ mod tests {
         // Should find both file() calls even though deeply nested
         assert_eq!(config.deps.len(), 2);
 
-        assert!(
-            config
-                .deps
-                .iter()
-                .all(|d| d.kind == DependencyKind::FileRead)
-        );
+        assert!(config.deps.iter().all(|d| d.kind == DependencyKind::FileRead));
 
         let paths: Vec<&PathExpr> = config.deps.iter().map(|d| &d.path).collect();
         assert!(paths.contains(&&PathExpr::Literal("../base.yaml".to_string())));
@@ -1051,10 +935,7 @@ mod tests {
                 }
 
                 // Second part: literal "/_envcommon/service.hcl"
-                assert_eq!(
-                    parts[1],
-                    PathExpr::Literal("/_envcommon/service.hcl".to_string())
-                );
+                assert_eq!(parts[1], PathExpr::Literal("/_envcommon/service.hcl".to_string()));
             }
             _ => panic!("Expected Interpolation, got {:?}", dep.path),
         }
@@ -1082,7 +963,8 @@ mod tests {
     #[test]
     fn test_extract_path_expr_template_complex() {
         // Test a more complex template with nested functions
-        let hcl_str = r#"test = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/${get_terragrunt_dir()}.hcl""#;
+        let hcl_str =
+            r#"test = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/${get_terragrunt_dir()}.hcl""#;
         let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
         let attr = body.attributes().next().unwrap();
 
@@ -1136,15 +1018,17 @@ mod tests {
     #[test]
     fn test_extract_path_expr_format_simple() {
         // format("%s/alarm_topic", dirname(find_in_parent_folders("env.hcl")))
-        let hcl_str =
-            r#"test = format("%s/alarm_topic", dirname(find_in_parent_folders("env.hcl")))"#;
+        let hcl_str = r#"test = format("%s/alarm_topic", dirname(find_in_parent_folders("env.hcl")))"#;
         let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
         let attr = body.attributes().next().unwrap();
 
         let path_expr = extract_path_expr(attr.expr());
 
         match path_expr {
-            PathExpr::Format { fmt, args } => {
+            PathExpr::Format {
+                fmt,
+                args,
+            } => {
                 assert_eq!(fmt, "%s/alarm_topic");
                 assert_eq!(args.len(), 1);
 
@@ -1173,7 +1057,10 @@ mod tests {
         let path_expr = extract_path_expr(attr.expr());
 
         match path_expr {
-            PathExpr::Format { fmt, args } => {
+            PathExpr::Format {
+                fmt,
+                args,
+            } => {
                 assert_eq!(fmt, "%s/aws/_modules/cloudtrail");
                 assert_eq!(args.len(), 1);
                 assert_eq!(args[0], PathExpr::GetRepoRoot);
@@ -1192,7 +1079,10 @@ mod tests {
         let path_expr = extract_path_expr(attr.expr());
 
         match path_expr {
-            PathExpr::Format { fmt, args } => {
+            PathExpr::Format {
+                fmt,
+                args,
+            } => {
                 assert_eq!(fmt, "%s/%s/config.hcl");
                 assert_eq!(args.len(), 2);
                 assert_eq!(args[0], PathExpr::GetRepoRoot);

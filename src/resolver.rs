@@ -73,12 +73,13 @@ impl ResolveContext {
                 resolved.parent().map(|p| p.to_path_buf())
             }
 
-            PathExpr::Format { fmt, args } => {
+            PathExpr::Format {
+                fmt,
+                args,
+            } => {
                 // Resolve all arguments first
-                let resolved_args: Vec<String> = args
-                    .iter()
-                    .map(|arg| self.resolve(arg).map(|p| p.to_string()))
-                    .collect::<Option<Vec<_>>>()?;
+                let resolved_args: Vec<String> =
+                    args.iter().map(|arg| self.resolve(arg).map(|p| p.to_string())).collect::<Option<Vec<_>>>()?;
 
                 // Replace %s placeholders with resolved arguments
                 let mut result = fmt.clone();
@@ -127,7 +128,9 @@ impl ResolveContext {
                 Some(normalize_path(&path))
             }
 
-            PathExpr::Unresolvable { .. } => {
+            PathExpr::Unresolvable {
+                ..
+            } => {
                 // Can't resolve - return None
                 None
             }
@@ -137,9 +140,7 @@ impl ResolveContext {
     /// Get the repository root (directory containing .git).
     /// Result is cached after first computation.
     pub fn repo_root(&self) -> Option<&Utf8PathBuf> {
-        self.repo_root
-            .get_or_init(|| find_repo_root(&self.project_dir))
-            .as_ref()
+        self.repo_root.get_or_init(|| find_repo_root(&self.project_dir)).as_ref()
     }
 }
 
@@ -154,9 +155,7 @@ fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
         match component {
             Utf8Component::ParentDir => {
                 // Go up one level if possible
-                if !components.is_empty()
-                    && !matches!(components.last(), Some(Utf8Component::ParentDir))
-                {
+                if !components.is_empty() && !matches!(components.last(), Some(Utf8Component::ParentDir)) {
                     components.pop();
                 } else {
                     components.push(component);
@@ -232,8 +231,7 @@ mod tests {
     fn setup_fixtures() {
         INIT.call_once(|| {
             let manifest_dir = env!("CARGO_MANIFEST_DIR");
-            let resolver_fixtures = std::path::Path::new(manifest_dir)
-                .join("tests/fixtures/resolver");
+            let resolver_fixtures = std::path::Path::new(manifest_dir).join("tests/fixtures/resolver");
 
             // Create .git directory for repo fixture
             let repo_git = resolver_fixtures.join("repo/.git");
@@ -246,9 +244,7 @@ mod tests {
     fn fixture_path(name: &str) -> Utf8PathBuf {
         setup_fixtures();
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        Utf8PathBuf::from(manifest_dir)
-            .join("tests/fixtures/resolver")
-            .join(name)
+        Utf8PathBuf::from(manifest_dir).join("tests/fixtures/resolver").join(name)
     }
 
     // ============== Literal path resolution ==============
@@ -303,9 +299,7 @@ mod tests {
         let project_dir = fixture_path("repo/live/prod/vpc");
         let ctx = ResolveContext::new(project_dir);
 
-        let result = ctx.resolve(&PathExpr::FindInParentFolders(Some(
-            "region.hcl".to_string(),
-        )));
+        let result = ctx.resolve(&PathExpr::FindInParentFolders(Some("region.hcl".to_string())));
 
         // Should find repo/live/prod/region.hcl
         assert_eq!(result, Some(fixture_path("repo/live/prod/region.hcl")));
@@ -316,9 +310,7 @@ mod tests {
         let project_dir = fixture_path("repo/live/prod/vpc");
         let ctx = ResolveContext::new(project_dir);
 
-        let result = ctx.resolve(&PathExpr::FindInParentFolders(Some(
-            "nonexistent.hcl".to_string(),
-        )));
+        let result = ctx.resolve(&PathExpr::FindInParentFolders(Some("nonexistent.hcl".to_string())));
 
         assert_eq!(result, None);
     }
@@ -412,8 +404,7 @@ mod tests {
         let project_dir = fixture_path("repo/live/prod/vpc");
         let ctx = ResolveContext::new(project_dir);
 
-        let path_expr =
-            PathExpr::Dirname(Box::new(PathExpr::Literal("/path/to/file.hcl".to_string())));
+        let path_expr = PathExpr::Dirname(Box::new(PathExpr::Literal("/path/to/file.hcl".to_string())));
 
         let result = ctx.resolve(&path_expr);
 
@@ -426,9 +417,7 @@ mod tests {
         let ctx = ResolveContext::new(project_dir);
 
         // dirname(find_in_parent_folders("root.hcl"))
-        let path_expr = PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some(
-            "root.hcl".to_string(),
-        ))));
+        let path_expr = PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some("root.hcl".to_string()))));
 
         let result = ctx.resolve(&path_expr);
 
@@ -460,10 +449,8 @@ mod tests {
         let ctx = ResolveContext::new(project_dir.clone());
 
         // "${get_repo_root()}/modules/vpc"
-        let path_expr = PathExpr::Interpolation(vec![
-            PathExpr::GetRepoRoot,
-            PathExpr::Literal("/modules/vpc".to_string()),
-        ]);
+        let path_expr =
+            PathExpr::Interpolation(vec![PathExpr::GetRepoRoot, PathExpr::Literal("/modules/vpc".to_string())]);
 
         let result = ctx.resolve(&path_expr);
 
@@ -477,18 +464,13 @@ mod tests {
 
         // "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/service.hcl"
         let path_expr = PathExpr::Interpolation(vec![
-            PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some(
-                "root.hcl".to_string(),
-            )))),
+            PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some("root.hcl".to_string())))),
             PathExpr::Literal("/_envcommon/service.hcl".to_string()),
         ]);
 
         let result = ctx.resolve(&path_expr);
 
-        assert_eq!(
-            result,
-            Some(fixture_path("repo_with_template/_envcommon/service.hcl"))
-        );
+        assert_eq!(result, Some(fixture_path("repo_with_template/_envcommon/service.hcl")));
     }
 
     #[test]
@@ -572,9 +554,7 @@ mod tests {
         // format("%s/alarm_topic", dirname(find_in_parent_folders("root.hcl")))
         let path_expr = PathExpr::Format {
             fmt: "%s/alarm_topic".to_string(),
-            args: vec![PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(
-                Some("root.hcl".to_string()),
-            )))],
+            args: vec![PathExpr::Dirname(Box::new(PathExpr::FindInParentFolders(Some("root.hcl".to_string()))))],
         };
 
         let result = ctx.resolve(&path_expr);

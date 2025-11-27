@@ -42,10 +42,8 @@ fn compute_layers(projects: &[Project], _base_dir: Option<&Utf8PathBuf>) -> Hash
                 .collect();
 
             // Check if all dependencies have been assigned layers
-            let deps_layers: Option<Vec<u32>> = dep_names
-                .iter()
-                .map(|dep_name| layers.get(dep_name).copied())
-                .collect();
+            let deps_layers: Option<Vec<u32>> =
+                dep_names.iter().map(|dep_name| layers.get(dep_name).copied()).collect();
 
             match deps_layers {
                 Some(dep_layers) if dep_names.is_empty() || dep_layers.len() == dep_names.len() => {
@@ -82,7 +80,9 @@ pub struct Output {
 
 impl Output {
     pub fn new(projects: Vec<Project>) -> Self {
-        Self { projects }
+        Self {
+            projects,
+        }
     }
 
     pub fn to_json(&self) -> serde_json::Result<String> {
@@ -150,10 +150,7 @@ pub enum OutputError {
 /// Convert a path to relative form if a base directory is provided
 fn make_relative(path: &camino::Utf8Path, base_dir: Option<&camino::Utf8Path>) -> String {
     match base_dir {
-        Some(base) => path
-            .strip_prefix(base)
-            .map(|p| p.to_string())
-            .unwrap_or_else(|_| path.to_string()),
+        Some(base) => path.strip_prefix(base).map(|p| p.to_string()).unwrap_or_else(|_| path.to_string()),
         None => path.to_string(),
     }
 }
@@ -261,21 +258,14 @@ fn to_generic_project(project: &Project, config: &OutputConfig) -> GenericProjec
         name,
         dir,
         dependencies,
-        watch_files: project
-            .watch_files
-            .iter()
-            .map(|f| make_relative(f, config.base_dir.as_deref()))
-            .collect(),
+        watch_files: project.watch_files.iter().map(|f| make_relative(f, config.base_dir.as_deref())).collect(),
     }
 }
 
 /// Generate JSON output
 fn generate_json(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
     let output = GenericOutput {
-        projects: projects
-            .iter()
-            .map(|p| to_generic_project(p, config))
-            .collect(),
+        projects: projects.iter().map(|p| to_generic_project(p, config)).collect(),
     };
     Ok(serde_json::to_string_pretty(&output)?)
 }
@@ -283,10 +273,7 @@ fn generate_json(projects: &[Project], config: &OutputConfig) -> Result<String, 
 /// Generate YAML output
 fn generate_yaml(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
     let output = GenericOutput {
-        projects: projects
-            .iter()
-            .map(|p| to_generic_project(p, config))
-            .collect(),
+        projects: projects.iter().map(|p| to_generic_project(p, config)).collect(),
     };
     Ok(serde_yaml::to_string(&output)?)
 }
@@ -326,11 +313,7 @@ fn compute_relative_path(from_dir: &camino::Utf8Path, to_path: &camino::Utf8Path
     let to_components: Vec<_> = to_path.components().collect();
 
     // Find common prefix length
-    let common_len = from_components
-        .iter()
-        .zip(to_components.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
+    let common_len = from_components.iter().zip(to_components.iter()).take_while(|(a, b)| a == b).count();
 
     // Number of ".." needed to go up from from_dir to common ancestor
     let ups = from_components.len() - common_len;
@@ -409,10 +392,7 @@ fn generate_atlantis(projects: &[Project], config: &OutputConfig) -> Result<Stri
                 // Workspace defaults to name if not overridden
                 workspace: config.workspace.clone().unwrap_or_else(|| name.clone()),
                 terraform_version: config.terraform_version.clone(),
-                workflow: config
-                    .workflow
-                    .clone()
-                    .unwrap_or_else(|| "terragrunt".to_string()),
+                workflow: config.workflow.clone().unwrap_or_else(|| "terragrunt".to_string()),
                 autoplan: AtlantisAutoplan {
                     when_modified,
                     enabled: config.autoplan_enabled,
@@ -484,10 +464,7 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
                 // Workspace defaults to name if not overridden
                 workspace: config.workspace.clone().unwrap_or_else(|| name.clone()),
                 terragrunt: true,
-                workflow: config
-                    .workflow
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string()),
+                workflow: config.workflow.clone().unwrap_or_else(|| "default".to_string()),
                 include_patterns,
                 depends_on,
                 layer,
@@ -537,10 +514,7 @@ mod tests {
                 name: "prod_app".to_string(),
                 dir: Utf8PathBuf::from("/repo/live/prod/app"),
                 // Dependencies are now absolute paths
-                project_dependencies: vec![
-                    "/repo/live/prod/vpc".to_string(),
-                    "/repo/live/prod/rds".to_string(),
-                ],
+                project_dependencies: vec!["/repo/live/prod/vpc".to_string(), "/repo/live/prod/rds".to_string()],
                 watch_files: vec![Utf8PathBuf::from("/repo/live/common/root.hcl")],
                 has_terraform_source: true,
             },
@@ -554,11 +528,9 @@ mod tests {
         let projects = sample_projects();
         let config = OutputConfig::default();
 
-        let output =
-            generate_output(&projects, OutputFormat::Json, &config).expect("should generate JSON");
+        let output = generate_output(&projects, OutputFormat::Json, &config).expect("should generate JSON");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&output).expect("should be valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("should be valid JSON");
 
         assert!(parsed["projects"].is_array());
         assert_eq!(parsed["projects"].as_array().unwrap().len(), 2);
@@ -575,18 +547,12 @@ mod tests {
             ..Default::default()
         };
 
-        let output =
-            generate_output(&projects, OutputFormat::Json, &config).expect("should generate JSON");
+        let output = generate_output(&projects, OutputFormat::Json, &config).expect("should generate JSON");
 
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed["projects"][0]["dir"], "live/prod/vpc");
-        assert!(
-            parsed["projects"][0]["watch_files"][0]
-                .as_str()
-                .unwrap()
-                .starts_with("live/")
-        );
+        assert!(parsed["projects"][0]["watch_files"][0].as_str().unwrap().starts_with("live/"));
     }
 
     // ============== YAML Output Tests ==============
@@ -596,11 +562,9 @@ mod tests {
         let projects = sample_projects();
         let config = OutputConfig::default();
 
-        let output =
-            generate_output(&projects, OutputFormat::Yaml, &config).expect("should generate YAML");
+        let output = generate_output(&projects, OutputFormat::Yaml, &config).expect("should generate YAML");
 
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(&output).expect("should be valid YAML");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).expect("should be valid YAML");
 
         assert!(parsed["projects"].is_sequence());
         // Without base_dir, name is derived from absolute path
@@ -618,8 +582,8 @@ mod tests {
             ..Default::default()
         };
 
-        let output = generate_output(&projects, OutputFormat::Atlantis, &config)
-            .expect("should generate Atlantis YAML");
+        let output =
+            generate_output(&projects, OutputFormat::Atlantis, &config).expect("should generate Atlantis YAML");
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
@@ -648,9 +612,7 @@ mod tests {
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
-        let when_modified = parsed["projects"][0]["autoplan"]["when_modified"]
-            .as_sequence()
-            .unwrap();
+        let when_modified = parsed["projects"][0]["autoplan"]["when_modified"].as_sequence().unwrap();
 
         let patterns: Vec<&str> = when_modified.iter().filter_map(|v| v.as_str()).collect();
 
@@ -668,8 +630,7 @@ mod tests {
             ..Default::default()
         };
 
-        let output = generate_output(&projects, OutputFormat::Digger, &config)
-            .expect("should generate Digger YAML");
+        let output = generate_output(&projects, OutputFormat::Digger, &config).expect("should generate Digger YAML");
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
@@ -711,24 +672,14 @@ mod tests {
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
-        let include_patterns = parsed["projects"][0]["include_patterns"]
-            .as_sequence()
-            .unwrap();
+        let include_patterns = parsed["projects"][0]["include_patterns"].as_sequence().unwrap();
 
         let patterns: Vec<&str> = include_patterns.iter().filter_map(|v| v.as_str()).collect();
 
         // Self-reference should be ./**
-        assert!(
-            patterns.contains(&"./**"),
-            "Expected ./** for self-reference, got {:?}",
-            patterns
-        );
+        assert!(patterns.contains(&"./**"), "Expected ./** for self-reference, got {:?}", patterns);
         // Watch files should be relative to project dir with ../ prefix
-        assert!(
-            patterns.iter().any(|p| p.contains("root.hcl")),
-            "Expected path to root.hcl, got {:?}",
-            patterns
-        );
+        assert!(patterns.iter().any(|p| p.contains("root.hcl")), "Expected path to root.hcl, got {:?}", patterns);
     }
 
     #[test]
@@ -737,10 +688,7 @@ mod tests {
             name: "prod_app".to_string(),
             dir: Utf8PathBuf::from("/repo/live/prod/app"),
             project_dependencies: vec![],
-            watch_files: vec![
-                Utf8PathBuf::from("/repo/root.hcl"),
-                Utf8PathBuf::from("/repo/live/common.hcl"),
-            ],
+            watch_files: vec![Utf8PathBuf::from("/repo/root.hcl"), Utf8PathBuf::from("/repo/live/common.hcl")],
             has_terraform_source: true,
         }];
         let config = OutputConfig {
@@ -752,23 +700,13 @@ mod tests {
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
-        let include_patterns = parsed["projects"][0]["include_patterns"]
-            .as_sequence()
-            .unwrap();
+        let include_patterns = parsed["projects"][0]["include_patterns"].as_sequence().unwrap();
 
         let patterns: Vec<&str> = include_patterns.iter().filter_map(|v| v.as_str()).collect();
 
         // Paths should be relative to project dir with ../ prefix for Digger
-        assert!(
-            patterns.contains(&"../../../root.hcl"),
-            "Expected ../../../root.hcl, got {:?}",
-            patterns
-        );
-        assert!(
-            patterns.contains(&"../../common.hcl"),
-            "Expected ../../common.hcl, got {:?}",
-            patterns
-        );
+        assert!(patterns.contains(&"../../../root.hcl"), "Expected ../../../root.hcl, got {:?}", patterns);
+        assert!(patterns.contains(&"../../common.hcl"), "Expected ../../common.hcl, got {:?}", patterns);
     }
 
     // ============== Edge Cases ==============
@@ -778,18 +716,9 @@ mod tests {
         let projects: Vec<Project> = vec![];
         let config = OutputConfig::default();
 
-        for format in [
-            OutputFormat::Json,
-            OutputFormat::Yaml,
-            OutputFormat::Atlantis,
-            OutputFormat::Digger,
-        ] {
+        for format in [OutputFormat::Json, OutputFormat::Yaml, OutputFormat::Atlantis, OutputFormat::Digger] {
             let output = generate_output(&projects, format, &config);
-            assert!(
-                output.is_ok(),
-                "Format {:?} should handle empty projects",
-                format
-            );
+            assert!(output.is_ok(), "Format {:?} should handle empty projects", format);
         }
     }
 
@@ -808,13 +737,7 @@ mod tests {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
         let depends_on = &parsed["projects"][0]["depends_on"];
-        assert!(
-            depends_on.is_null()
-                || depends_on
-                    .as_sequence()
-                    .map(|s| s.is_empty())
-                    .unwrap_or(true)
-        );
+        assert!(depends_on.is_null() || depends_on.as_sequence().map(|s| s.is_empty()).unwrap_or(true));
     }
 
     // ============== Layer Computation Tests ==============
@@ -979,18 +902,8 @@ mod tests {
 
         // vpc should be group 0, app should be group 1
         // Without base_dir, names are derived from absolute paths
-        let vpc = parsed["projects"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"] == "_repo_vpc")
-            .unwrap();
-        let app = parsed["projects"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"] == "_repo_app")
-            .unwrap();
+        let vpc = parsed["projects"].as_sequence().unwrap().iter().find(|p| p["name"] == "_repo_vpc").unwrap();
+        let app = parsed["projects"].as_sequence().unwrap().iter().find(|p| p["name"] == "_repo_app").unwrap();
 
         assert_eq!(vpc["execution_order_group"], 0);
         assert_eq!(app["execution_order_group"], 1);
@@ -1020,18 +933,8 @@ mod tests {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
         // Without base_dir, names are derived from absolute paths
-        let vpc = parsed["projects"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"] == "_repo_vpc")
-            .unwrap();
-        let app = parsed["projects"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"] == "_repo_app")
-            .unwrap();
+        let vpc = parsed["projects"].as_sequence().unwrap().iter().find(|p| p["name"] == "_repo_vpc").unwrap();
+        let app = parsed["projects"].as_sequence().unwrap().iter().find(|p| p["name"] == "_repo_app").unwrap();
 
         assert_eq!(vpc["layer"], 0);
         assert_eq!(app["layer"], 1);
@@ -1063,10 +966,7 @@ mod tests {
         let from = camino::Utf8Path::new("/repo/prod/us-east-1/prod/webserver-cluster");
         let to = camino::Utf8Path::new("/repo/_envcommon/webserver-cluster.hcl");
 
-        assert_eq!(
-            compute_relative_path(from, to),
-            "../../../../_envcommon/webserver-cluster.hcl"
-        );
+        assert_eq!(compute_relative_path(from, to), "../../../../_envcommon/webserver-cluster.hcl");
     }
 
     #[test]
@@ -1084,10 +984,7 @@ mod tests {
             name: "prod_app".to_string(),
             dir: Utf8PathBuf::from("/repo/live/prod/app"),
             project_dependencies: vec![],
-            watch_files: vec![
-                Utf8PathBuf::from("/repo/root.hcl"),
-                Utf8PathBuf::from("/repo/live/common.hcl"),
-            ],
+            watch_files: vec![Utf8PathBuf::from("/repo/root.hcl"), Utf8PathBuf::from("/repo/live/common.hcl")],
             has_terraform_source: true,
         }];
         let config = OutputConfig {
@@ -1098,23 +995,13 @@ mod tests {
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
-        let when_modified = parsed["projects"][0]["autoplan"]["when_modified"]
-            .as_sequence()
-            .unwrap();
+        let when_modified = parsed["projects"][0]["autoplan"]["when_modified"].as_sequence().unwrap();
 
         let patterns: Vec<&str> = when_modified.iter().filter_map(|v| v.as_str()).collect();
 
         // Paths should be relative to project dir (/repo/live/prod/app)
-        assert!(
-            patterns.contains(&"../../../root.hcl"),
-            "Expected ../../../root.hcl, got {:?}",
-            patterns
-        );
-        assert!(
-            patterns.contains(&"../../common.hcl"),
-            "Expected ../../common.hcl, got {:?}",
-            patterns
-        );
+        assert!(patterns.contains(&"../../../root.hcl"), "Expected ../../../root.hcl, got {:?}", patterns);
+        assert!(patterns.contains(&"../../common.hcl"), "Expected ../../common.hcl, got {:?}", patterns);
     }
 
     // ============== Project Name Derivation Tests ==============
@@ -1129,20 +1016,14 @@ mod tests {
     #[test]
     fn test_derive_name_from_relative_dir_nested() {
         // Nested paths should have slashes replaced with underscores
-        assert_eq!(
-            derive_name_from_dir("apps/pass/ecs_service"),
-            "apps_pass_ecs_service"
-        );
+        assert_eq!(derive_name_from_dir("apps/pass/ecs_service"), "apps_pass_ecs_service");
         assert_eq!(derive_name_from_dir("live/prod/vpc"), "live_prod_vpc");
     }
 
     #[test]
     fn test_derive_name_from_relative_dir_with_backslash() {
         // Handle Windows-style paths (though we use UTF-8 paths)
-        assert_eq!(
-            derive_name_from_dir("apps\\pass\\ecs_service"),
-            "apps_pass_ecs_service"
-        );
+        assert_eq!(derive_name_from_dir("apps\\pass\\ecs_service"), "apps_pass_ecs_service");
     }
 
     #[test]

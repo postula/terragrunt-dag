@@ -6,12 +6,9 @@ use terragrunt_dag::discovery::discover_projects;
 use terragrunt_dag::parser::parse_terragrunt_file;
 
 fn bench_discovery(c: &mut Criterion) {
-    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/discovery/nested_projects");
+    let fixture = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/discovery/nested_projects");
 
-    c.bench_function("discover_projects/nested", |b| {
-        b.iter(|| discover_projects(black_box(&fixture)))
-    });
+    c.bench_function("discover_projects/nested", |b| b.iter(|| discover_projects(black_box(&fixture))));
 }
 
 fn bench_parse_hcl(c: &mut Criterion) {

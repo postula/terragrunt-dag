@@ -10,11 +10,7 @@ use terragrunt_dag::processor::{ParseCache, ProjectResult, process_all_projects}
 
 #[derive(Parser)]
 #[command(name = "terragrunt-dag")]
-#[command(
-    author,
-    version,
-    about = "Generate dependency graph for terragrunt projects"
-)]
+#[command(author, version, about = "Generate dependency graph for terragrunt projects")]
 struct Cli {
     /// Root directory to scan for terragrunt projects
     root: Utf8PathBuf,
@@ -128,10 +124,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if cli.verbose {
-        eprintln!(
-            "Processing {} projects (after filter)",
-            filtered_paths.len()
-        );
+        eprintln!("Processing {} projects (after filter)", filtered_paths.len());
     }
 
     // Step 3: Process projects with caching
@@ -140,10 +133,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if cli.verbose {
         let (cache_entries, cache_deps) = cache.stats();
-        eprintln!(
-            "Cache stats: {} files parsed, {} total dependencies",
-            cache_entries, cache_deps
-        );
+        eprintln!("Cache stats: {} files parsed, {} total dependencies", cache_entries, cache_deps);
     }
 
     // Step 4: Collect successful projects and report errors
@@ -164,7 +154,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            ProjectResult::Err { path, error } => {
+            ProjectResult::Err {
+                path,
+                error,
+            } => {
                 errors.push((path, error));
             }
         }
@@ -181,10 +174,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.verbose {
         eprintln!("Successfully processed {} projects", projects.len());
         if filtered_no_terraform > 0 {
-            eprintln!(
-                "Filtered out {} projects without terraform source",
-                filtered_no_terraform
-            );
+            eprintln!("Filtered out {} projects without terraform source", filtered_no_terraform);
         }
     }
 

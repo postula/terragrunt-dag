@@ -5,31 +5,17 @@ use std::io::Result;
 use walkdir::{DirEntry, WalkDir};
 
 /// Directories to skip during discovery
-const IGNORED_DIRS: &[&str] = &[
-    ".terragrunt-cache",
-    ".terraform",
-    ".git",
-    "node_modules",
-    ".venv",
-    "venv",
-    "__pycache__",
-];
+const IGNORED_DIRS: &[&str] =
+    &[".terragrunt-cache", ".terraform", ".git", "node_modules", ".venv", "venv", "__pycache__"];
 
 fn is_ignored(entry: &DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| IGNORED_DIRS.contains(&s) || s.starts_with('.'))
-        .unwrap_or(false)
+    entry.file_name().to_str().map(|s| IGNORED_DIRS.contains(&s) || s.starts_with('.')).unwrap_or(false)
 }
 
 /// Discovers all terragrunt.hcl files under the given root directory.
 pub fn discover_projects(root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     if !root.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("root path does not exist: {}", root),
-        ));
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("root path does not exist: {}", root)));
     }
     Ok(WalkDir::new(root)
         .into_iter()
@@ -51,9 +37,7 @@ mod tests {
 
     fn fixture_path(name: &str) -> Utf8PathBuf {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        Utf8PathBuf::from(manifest_dir)
-            .join("tests/fixtures")
-            .join(name)
+        Utf8PathBuf::from(manifest_dir).join("tests/fixtures").join(name)
     }
 
     #[rstest]

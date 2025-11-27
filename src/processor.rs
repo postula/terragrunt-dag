@@ -28,7 +28,10 @@ pub enum ProjectResult {
     /// Successfully processed project
     Ok(Project),
     /// Failed to process - path and error message
-    Err { path: Utf8PathBuf, error: String },
+    Err {
+        path: Utf8PathBuf,
+        error: String,
+    },
 }
 
 /// Cached config data
@@ -58,16 +61,11 @@ impl ParseCache {
     /// Get or parse a config file, returning the full config.
     ///
     /// Returns cached result if available, otherwise parses and caches.
-    pub(crate) fn get_or_parse_config(
-        &self,
-        path: &Utf8Path,
-    ) -> Result<CachedConfig, ProcessError> {
+    pub(crate) fn get_or_parse_config(&self, path: &Utf8Path) -> Result<CachedConfig, ProcessError> {
         use crate::parser::parse_terragrunt_file;
 
         // Normalize path for cache key
-        let key = path
-            .canonicalize_utf8()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let key = path.canonicalize_utf8().unwrap_or_else(|_| path.to_path_buf());
 
         // Check cache first
         if let Some(config) = self.cache.get(&key) {
@@ -122,22 +120,16 @@ pub fn process_projects(paths: Vec<Utf8PathBuf>) -> Vec<ProjectResult> {
 /// when they are referenced by multiple projects.
 ///
 /// If cascade=true, includes transitive dependencies (dependencies of dependencies).
-pub fn process_all_projects(
-    project_dirs: Vec<Utf8PathBuf>,
-    cache: &ParseCache,
-    cascade: bool,
-) -> Vec<ProjectResult> {
+pub fn process_all_projects(project_dirs: Vec<Utf8PathBuf>, cache: &ParseCache, cascade: bool) -> Vec<ProjectResult> {
     project_dirs
         .into_par_iter()
-        .map(
-            |dir| match process_project_with_deps(&dir, cache, cascade) {
-                Ok(project) => ProjectResult::Ok(project),
-                Err(e) => ProjectResult::Err {
-                    path: dir,
-                    error: e.to_string(),
-                },
+        .map(|dir| match process_project_with_deps(&dir, cache, cascade) {
+            Ok(project) => ProjectResult::Ok(project),
+            Err(e) => ProjectResult::Err {
+                path: dir,
+                error: e.to_string(),
             },
-        )
+        })
         .collect()
 }
 
@@ -176,21 +168,10 @@ fn derive_project_name(path: &Utf8PathBuf) -> String {
         .collect();
 
     // Skip common root directories and repository names
-    let skip_prefixes = [
-        "live",
-        "terragrunt",
-        "infrastructure",
-        "infra",
-        "repo",
-        "projects",
-    ];
+    let skip_prefixes = ["live", "terragrunt", "infrastructure", "infra", "repo", "projects"];
 
     // Filter out skip prefixes from all components
-    let meaningful: Vec<&str> = components
-        .iter()
-        .filter(|c| !skip_prefixes.contains(c))
-        .copied()
-        .collect();
+    let meaningful: Vec<&str> = components.iter().filter(|c| !skip_prefixes.contains(c)).copied().collect();
 
     if meaningful.is_empty() {
         "unknown".to_string()
@@ -273,17 +254,12 @@ struct LoadContext<'a> {
 /// context for parent folder lookups.
 ///
 /// If cascade=true, also includes transitive dependencies (dependencies of dependencies).
-fn load_config_recursive(
-    config_path: &Utf8Path,
-    ctx: &mut LoadContext,
-) -> Result<(), ProcessError> {
+fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Result<(), ProcessError> {
     use crate::parser::DependencyKind;
     use crate::resolver::ResolveContext;
 
     // Normalize path for consistent visited tracking
-    let normalized = config_path
-        .canonicalize_utf8()
-        .unwrap_or_else(|_| config_path.to_path_buf());
+    let normalized = config_path.canonicalize_utf8().unwrap_or_else(|_| config_path.to_path_buf());
 
     // Check for circular reference (within this project's recursion)
     if !ctx.visited.insert(normalized.clone()) {
@@ -310,12 +286,8 @@ fn load_config_recursive(
     // Create resolver context:
     // - config_dir: the current file's directory (for relative path resolution)
     // - project_dir: the original project directory (for find_in_parent_folders)
-    let config_dir = config_path
-        .parent()
-        .unwrap_or(ctx.project_dir)
-        .to_path_buf();
-    let resolve_ctx =
-        ResolveContext::for_included_config(config_dir.clone(), ctx.project_dir.to_path_buf());
+    let config_dir = config_path.parent().unwrap_or(ctx.project_dir).to_path_buf();
+    let resolve_ctx = ResolveContext::for_included_config(config_dir.clone(), ctx.project_dir.to_path_buf());
 
     // Process each dependency
     for dep in deps {
@@ -374,17 +346,10 @@ fn load_config_recursive(
         while let Some(dep_path) = to_process.pop_front() {
             // Parse the dependency's path to get its directory
             let dep_dir = if dep_path.ends_with("terragrunt.hcl") {
-                Utf8PathBuf::from(
-                    dep_path
-                        .strip_suffix("/terragrunt.hcl")
-                        .unwrap_or(&dep_path),
-                )
+                Utf8PathBuf::from(dep_path.strip_suffix("/terragrunt.hcl").unwrap_or(&dep_path))
             } else if dep_path.ends_with(".hcl") {
                 // Generic .hcl file, take parent directory
-                Utf8PathBuf::from(&dep_path)
-                    .parent()
-                    .unwrap_or(Utf8Path::new(&dep_path))
-                    .to_path_buf()
+                Utf8PathBuf::from(&dep_path).parent().unwrap_or(Utf8Path::new(&dep_path)).to_path_buf()
             } else {
                 // Assume it's already a directory path
                 Utf8PathBuf::from(&dep_path)
@@ -398,9 +363,7 @@ fn load_config_recursive(
             };
 
             // Normalize path to check if we've already processed this project
-            let normalized_dep_path = dep_hcl_path
-                .canonicalize_utf8()
-                .unwrap_or_else(|_| dep_hcl_path.clone());
+            let normalized_dep_path = dep_hcl_path.canonicalize_utf8().unwrap_or_else(|_| dep_hcl_path.clone());
 
             // Skip if we've already processed this dependency (prevents infinite loops)
             if !processed.insert(normalized_dep_path.clone()) {
@@ -470,15 +433,15 @@ mod tests {
                 // Name should skip "live" and "repo" prefixes
                 assert_eq!(project.name, "prod_vpc");
             }
-            ProjectResult::Err { .. } => panic!("Expected Ok result"),
+            ProjectResult::Err {
+                ..
+            } => panic!("Expected Ok result"),
         }
     }
 
     #[test]
     fn test_process_multiple_projects_parallel() {
-        let paths: Vec<Utf8PathBuf> = (0..100)
-            .map(|i| Utf8PathBuf::from(format!("/repo/live/env{}/app", i)))
-            .collect();
+        let paths: Vec<Utf8PathBuf> = (0..100).map(|i| Utf8PathBuf::from(format!("/repo/live/env{}/app", i))).collect();
 
         let results = process_projects(paths);
 
@@ -496,19 +459,14 @@ mod tests {
     #[case("/infrastructure/prod/network", "prod_network")]
     #[case("/some/path/without/skip/prefix", "some_path_without_skip_prefix")]
     fn test_derive_project_name(#[case] input_path: &str, #[case] expected_name: &str) {
-        assert_eq!(
-            derive_project_name(&Utf8PathBuf::from(input_path)),
-            expected_name
-        );
+        assert_eq!(derive_project_name(&Utf8PathBuf::from(input_path)), expected_name);
     }
 
     // ============== Recursive config loading tests ==============
 
     fn processor_fixture_path(name: &str) -> Utf8PathBuf {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        Utf8PathBuf::from(manifest_dir)
-            .join("tests/fixtures/processor")
-            .join(name)
+        Utf8PathBuf::from(manifest_dir).join("tests/fixtures/processor").join(name)
     }
 
     #[test]
@@ -516,8 +474,7 @@ mod tests {
         let project_dir = processor_fixture_path("with_read_terragrunt_config/app");
         let cache = ParseCache::new();
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Should have dependencies from both app/terragrunt.hcl AND common.hcl
         // app has: dependency "rds"
@@ -525,18 +482,12 @@ mod tests {
         // Dependencies are now absolute paths
         assert_eq!(project.project_dependencies.len(), 2);
         assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("rds")),
+            project.project_dependencies.iter().any(|d| d.ends_with("rds")),
             "Should have rds dependency. Got: {:?}",
             project.project_dependencies
         );
         assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("vpc")),
+            project.project_dependencies.iter().any(|d| d.ends_with("vpc")),
             "Should have vpc dependency. Got: {:?}",
             project.project_dependencies
         );
@@ -544,18 +495,8 @@ mod tests {
         // Watch files should include:
         // - common.hcl (the read_terragrunt_config target)
         // - data/common.yaml (file() in common.hcl)
-        assert!(
-            project
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("common.hcl"))
-        );
-        assert!(
-            project
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("common.yaml"))
-        );
+        assert!(project.watch_files.iter().any(|f| f.ends_with("common.hcl")));
+        assert!(project.watch_files.iter().any(|f| f.ends_with("common.yaml")));
     }
 
     #[test]
@@ -563,27 +504,16 @@ mod tests {
         let project_dir = processor_fixture_path("with_include_deps/live/prod/app");
         let cache = ParseCache::new();
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Should have dependency from app/terragrunt.hcl
-        assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.contains("vpc"))
-        );
+        assert!(project.project_dependencies.iter().any(|d| d.contains("vpc")));
 
         // Watch files should include:
         // - root.hcl (the include target)
         // - config.yaml (file() in root.hcl)
         assert!(project.watch_files.iter().any(|f| f.ends_with("root.hcl")));
-        assert!(
-            project
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("config.yaml"))
-        );
+        assert!(project.watch_files.iter().any(|f| f.ends_with("config.yaml")));
     }
 
     #[test]
@@ -591,8 +521,7 @@ mod tests {
         let project_dir = processor_fixture_path("with_nested_read_config/app");
         let cache = ParseCache::new();
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // app → env.hcl → base.hcl
         // Should collect watch files from all levels
@@ -621,8 +550,7 @@ mod tests {
         let project_dir = processor_fixture_path("with_read_terragrunt_config/app");
         let cache = ParseCache::new();
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Check no duplicates in watch_files
         let mut seen = std::collections::HashSet::new();
@@ -639,10 +567,8 @@ mod tests {
         let project_dir = processor_fixture_path("with_read_terragrunt_config/app");
 
         // Process twice
-        let project1 = process_project_with_deps(&project_dir, &cache, false)
-            .expect("first processing failed");
-        let project2 = process_project_with_deps(&project_dir, &cache, false)
-            .expect("second processing failed");
+        let project1 = process_project_with_deps(&project_dir, &cache, false).expect("first processing failed");
+        let project2 = process_project_with_deps(&project_dir, &cache, false).expect("second processing failed");
 
         // Both should have same results
         assert_eq!(project1.project_dependencies, project2.project_dependencies);
@@ -653,10 +579,7 @@ mod tests {
         assert!(entries > 0, "Cache should have entries");
 
         // Log cache stats for demonstration
-        println!(
-            "Cache stats after processing twice: {} files cached, {} total dependencies",
-            entries, total_deps
-        );
+        println!("Cache stats after processing twice: {} files cached, {} total dependencies", entries, total_deps);
     }
 
     #[test]
@@ -673,20 +596,14 @@ mod tests {
 
         // All should succeed
         assert_eq!(results.len(), 2);
-        assert!(
-            results.iter().all(|r| matches!(r, ProjectResult::Ok(_))),
-            "All projects should process successfully"
-        );
+        assert!(results.iter().all(|r| matches!(r, ProjectResult::Ok(_))), "All projects should process successfully");
 
         // Cache should have entries from both projects
         let (entries, total_deps) = cache.stats();
         assert!(entries > 0, "Cache should have entries");
 
         // Log cache stats for demonstration
-        println!(
-            "Cache stats after parallel processing: {} files cached, {} total dependencies",
-            entries, total_deps
-        );
+        println!("Cache stats after parallel processing: {} files cached, {} total dependencies", entries, total_deps);
     }
 
     #[test]
@@ -703,10 +620,7 @@ mod tests {
         let _ = process_project_with_deps(&project_dir, &cache, false);
 
         let (entries_after, _total_deps_after) = cache.stats();
-        assert!(
-            entries_after > 0,
-            "Cache should have entries after processing"
-        );
+        assert!(entries_after > 0, "Cache should have entries after processing");
     }
 
     #[test]
@@ -717,10 +631,7 @@ mod tests {
 
         // Should complete without infinite loop even with cache
         let result = process_project_with_deps(&project_dir, &cache, false);
-        assert!(
-            result.is_ok(),
-            "Should handle circular references with cache"
-        );
+        assert!(result.is_ok(), "Should handle circular references with cache");
     }
 
     #[test]
@@ -743,46 +654,32 @@ mod tests {
         let cache = ParseCache::new();
         let project_dir = processor_fixture_path("with_read_terragrunt_config/app");
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Verify dependency from common.hcl is present
         // Dependencies are now absolute paths
         assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("vpc")),
+            project.project_dependencies.iter().any(|d| d.ends_with("vpc")),
             "Should have vpc dependency from common.hcl. Got: {:?}",
             project.project_dependencies
         );
 
         // Verify dependency from app/terragrunt.hcl is present
         assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("rds")),
+            project.project_dependencies.iter().any(|d| d.ends_with("rds")),
             "Should have rds dependency from app/terragrunt.hcl. Got: {:?}",
             project.project_dependencies
         );
 
         // Verify watch file from common.hcl is present
         assert!(
-            project
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("common.yaml")),
+            project.watch_files.iter().any(|f| f.ends_with("common.yaml")),
             "Should have common.yaml watch file from common.hcl. Got: {:?}",
             project.watch_files
         );
 
         // Both dependencies should be resolved correctly
-        assert_eq!(
-            project.project_dependencies.len(),
-            2,
-            "Should have exactly 2 dependencies"
-        );
+        assert_eq!(project.project_dependencies.len(), 2, "Should have exactly 2 dependencies");
     }
 
     // ============== Terraform source detection tests ==============
@@ -793,8 +690,7 @@ mod tests {
         let cache = ParseCache::new();
         let project_dir = processor_fixture_path("empty_no_terraform");
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Should be marked as having no terraform source
         assert!(
@@ -809,14 +705,10 @@ mod tests {
         let cache = ParseCache::new();
         let project_dir = processor_fixture_path("has_terraform_source");
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Should be marked as having terraform source
-        assert!(
-            project.has_terraform_source,
-            "Project with terraform block should have has_terraform_source=true"
-        );
+        assert!(project.has_terraform_source, "Project with terraform block should have has_terraform_source=true");
     }
 
     #[test]
@@ -825,8 +717,7 @@ mod tests {
         let cache = ParseCache::new();
         let project_dir = processor_fixture_path("with_include_deps/live/prod/app");
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Should be marked as having terraform source (from included file)
         assert!(
@@ -846,8 +737,7 @@ mod tests {
 
         // This test will fail initially because we haven't created the fixture yet
         // and because has_terraform_source is only set when source attribute exists
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Should be marked as having terraform block
         assert!(
@@ -877,44 +767,25 @@ mod tests {
         let fixture_root = processor_fixture_path("dependency_naming");
         let project_dir = fixture_root.join("apps/ecs_instances");
 
-        let project = process_project_with_deps(&project_dir, &cache, false)
-            .expect("should process successfully");
+        let project = process_project_with_deps(&project_dir, &cache, false).expect("should process successfully");
 
         // Dependencies should be absolute paths, not derived names
-        assert_eq!(
-            project.project_dependencies.len(),
-            2,
-            "Should have 2 dependencies"
-        );
+        assert_eq!(project.project_dependencies.len(), 2, "Should have 2 dependencies");
 
         // Check that dependencies are absolute paths (contain full path components)
         for dep in &project.project_dependencies {
-            assert!(
-                dep.contains("platform"),
-                "Dependency should be absolute path containing 'platform', got: {}",
-                dep
-            );
-            assert!(
-                dep.starts_with('/') || dep.contains(":\\"),
-                "Dependency should be absolute path, got: {}",
-                dep
-            );
+            assert!(dep.contains("platform"), "Dependency should be absolute path containing 'platform', got: {}", dep);
+            assert!(dep.starts_with('/') || dep.contains(":\\"), "Dependency should be absolute path, got: {}", dep);
         }
 
         // Should have paths ending in vpc and load_balancer
         assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("vpc")),
+            project.project_dependencies.iter().any(|d| d.ends_with("vpc")),
             "Should have vpc dependency. Got: {:?}",
             project.project_dependencies
         );
         assert!(
-            project
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("load_balancer")),
+            project.project_dependencies.iter().any(|d| d.ends_with("load_balancer")),
             "Should have load_balancer dependency. Got: {:?}",
             project.project_dependencies
         );
@@ -940,8 +811,7 @@ mod tests {
 
         // Test cascade=true (default behavior)
         let project_a_dir = fixture_root.join("a");
-        let project_a = process_project_with_deps(&project_a_dir, &cache, true)
-            .expect("should process successfully");
+        let project_a = process_project_with_deps(&project_a_dir, &cache, true).expect("should process successfully");
 
         // A should have both B and C as dependencies (transitive closure)
         assert_eq!(
@@ -952,27 +822,20 @@ mod tests {
         );
 
         assert!(
-            project_a
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("b")),
+            project_a.project_dependencies.iter().any(|d| d.ends_with("b")),
             "A should have direct dependency B. Got: {:?}",
             project_a.project_dependencies
         );
 
         assert!(
-            project_a
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("c")),
+            project_a.project_dependencies.iter().any(|d| d.ends_with("c")),
             "A should have transitive dependency C with cascade=true. Got: {:?}",
             project_a.project_dependencies
         );
 
         // Verify B also has C
         let project_b_dir = fixture_root.join("b");
-        let project_b = process_project_with_deps(&project_b_dir, &cache, true)
-            .expect("should process successfully");
+        let project_b = process_project_with_deps(&project_b_dir, &cache, true).expect("should process successfully");
 
         assert_eq!(
             project_b.project_dependencies.len(),
@@ -982,18 +845,14 @@ mod tests {
         );
 
         assert!(
-            project_b
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("c")),
+            project_b.project_dependencies.iter().any(|d| d.ends_with("c")),
             "B should have dependency C. Got: {:?}",
             project_b.project_dependencies
         );
 
         // Verify C has no dependencies
         let project_c_dir = fixture_root.join("c");
-        let project_c = process_project_with_deps(&project_c_dir, &cache, true)
-            .expect("should process successfully");
+        let project_c = process_project_with_deps(&project_c_dir, &cache, true).expect("should process successfully");
 
         assert_eq!(
             project_c.project_dependencies.len(),
@@ -1011,8 +870,7 @@ mod tests {
 
         // Test with cascade=false
         let project_a_dir = fixture_root.join("a");
-        let project_a = process_project_with_deps(&project_a_dir, &cache, false)
-            .expect("should process successfully");
+        let project_a = process_project_with_deps(&project_a_dir, &cache, false).expect("should process successfully");
 
         // A should have ONLY B (direct dependency), not C
         assert_eq!(
@@ -1023,19 +881,13 @@ mod tests {
         );
 
         assert!(
-            project_a
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("b")),
+            project_a.project_dependencies.iter().any(|d| d.ends_with("b")),
             "A should have direct dependency B. Got: {:?}",
             project_a.project_dependencies
         );
 
         assert!(
-            !project_a
-                .project_dependencies
-                .iter()
-                .any(|d| d.ends_with("c")),
+            !project_a.project_dependencies.iter().any(|d| d.ends_with("c")),
             "A should NOT have transitive dependency C with cascade=false. Got: {:?}",
             project_a.project_dependencies
         );
@@ -1052,8 +904,7 @@ mod tests {
         let fixture_root = processor_fixture_path("cascade/diamond");
 
         let project_a_dir = fixture_root.join("a");
-        let project_a = process_project_with_deps(&project_a_dir, &cache, true)
-            .expect("should process successfully");
+        let project_a = process_project_with_deps(&project_a_dir, &cache, true).expect("should process successfully");
 
         // A should have B, C, and D (D deduplicated even though it comes from both B and C)
         assert_eq!(
@@ -1065,16 +916,8 @@ mod tests {
 
         // Verify each dependency appears exactly once
         let deps = &project_a.project_dependencies;
-        assert!(
-            deps.iter().filter(|d| d.ends_with("b")).count() == 1,
-            "B should appear exactly once. Got: {:?}",
-            deps
-        );
-        assert!(
-            deps.iter().filter(|d| d.ends_with("c")).count() == 1,
-            "C should appear exactly once. Got: {:?}",
-            deps
-        );
+        assert!(deps.iter().filter(|d| d.ends_with("b")).count() == 1, "B should appear exactly once. Got: {:?}", deps);
+        assert!(deps.iter().filter(|d| d.ends_with("c")).count() == 1, "C should appear exactly once. Got: {:?}", deps);
         assert!(
             deps.iter().filter(|d| d.ends_with("d")).count() == 1,
             "D should appear exactly once (deduplicated). Got: {:?}",
@@ -1097,8 +940,7 @@ mod tests {
         let fixture_root = processor_fixture_path("cascade/with_watch_files");
 
         let project_a_dir = fixture_root.join("a");
-        let project_a = process_project_with_deps(&project_a_dir, &cache, true)
-            .expect("should process successfully");
+        let project_a = process_project_with_deps(&project_a_dir, &cache, true).expect("should process successfully");
 
         // A should have dependencies: B, C
         assert_eq!(
@@ -1110,19 +952,13 @@ mod tests {
 
         // A should have watch files from B and C
         assert!(
-            project_a
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("config.yaml")),
+            project_a.watch_files.iter().any(|f| f.ends_with("config.yaml")),
             "A should have config.yaml from B's watch files. Got: {:?}",
             project_a.watch_files
         );
 
         assert!(
-            project_a
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("data.yaml")),
+            project_a.watch_files.iter().any(|f| f.ends_with("data.yaml")),
             "A should have data.yaml from C's watch files. Got: {:?}",
             project_a.watch_files
         );
@@ -1130,25 +966,18 @@ mod tests {
         // Test with cascade=false - should NOT include transitive watch files
         let cache_no_cascade = ParseCache::new();
         let project_a_no_cascade =
-            process_project_with_deps(&project_a_dir, &cache_no_cascade, false)
-                .expect("should process successfully");
+            process_project_with_deps(&project_a_dir, &cache_no_cascade, false).expect("should process successfully");
 
         // With cascade=false, A should only have its own watch files (none in this case)
         // and NOT the watch files from B and C
         assert!(
-            !project_a_no_cascade
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("config.yaml")),
+            !project_a_no_cascade.watch_files.iter().any(|f| f.ends_with("config.yaml")),
             "A should NOT have config.yaml from B with cascade=false. Got: {:?}",
             project_a_no_cascade.watch_files
         );
 
         assert!(
-            !project_a_no_cascade
-                .watch_files
-                .iter()
-                .any(|f| f.ends_with("data.yaml")),
+            !project_a_no_cascade.watch_files.iter().any(|f| f.ends_with("data.yaml")),
             "A should NOT have data.yaml from C with cascade=false. Got: {:?}",
             project_a_no_cascade.watch_files
         );
@@ -1172,10 +1001,7 @@ mod tests {
         let result = process_project_with_deps(&project_a_dir, &cache, true);
 
         // Should succeed (not hang or panic)
-        assert!(
-            result.is_ok(),
-            "Should handle circular dependencies with cascade enabled"
-        );
+        assert!(result.is_ok(), "Should handle circular dependencies with cascade enabled");
 
         let project_a = result.unwrap();
 
@@ -1205,15 +1031,13 @@ mod tests {
 
         // Test each node to verify correct transitive closure
         let project_a_dir = fixture_root.join("a");
-        let project_a = process_project_with_deps(&project_a_dir, &cache, true)
-            .expect("should process successfully");
+        let project_a = process_project_with_deps(&project_a_dir, &cache, true).expect("should process successfully");
 
         // A → [B, C] direct, D transitive via both
         assert_eq!(project_a.project_dependencies.len(), 3);
 
         let project_b_dir = fixture_root.join("b");
-        let project_b = process_project_with_deps(&project_b_dir, &cache, true)
-            .expect("should process successfully");
+        let project_b = process_project_with_deps(&project_b_dir, &cache, true).expect("should process successfully");
 
         // B → [D] direct
         assert_eq!(
@@ -1224,8 +1048,7 @@ mod tests {
         );
 
         let project_c_dir = fixture_root.join("c");
-        let project_c = process_project_with_deps(&project_c_dir, &cache, true)
-            .expect("should process successfully");
+        let project_c = process_project_with_deps(&project_c_dir, &cache, true).expect("should process successfully");
 
         // C → [D] direct
         assert_eq!(
@@ -1236,8 +1059,7 @@ mod tests {
         );
 
         let project_d_dir = fixture_root.join("d");
-        let project_d = process_project_with_deps(&project_d_dir, &cache, true)
-            .expect("should process successfully");
+        let project_d = process_project_with_deps(&project_d_dir, &cache, true).expect("should process successfully");
 
         // D → [] no dependencies
         assert_eq!(
