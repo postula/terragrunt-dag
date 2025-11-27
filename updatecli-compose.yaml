@@ -5,16 +5,22 @@ policies:
     values:
       - updatecli/values.d/scm.yaml
   - name: Update Updatecli policies
-    policy: ghcr.io/updatecli/policies/updatecli/autodiscovery:0.7.0@sha256:6890c4b4093a80063f518101881098fab8211c986481641faaf797a9ad5a31c3
+    policy: ghcr.io/updatecli/policies/updatecli/autodiscovery:0.5.0@sha256:947817644fb89e27f7b7121b822328c2d47364c7a3a08241e4d2ac1a5897020c
     values:
       - updatecli/values.d/scm.yaml
       - updatecli/values.d/updatecli-compose.yaml
-  - name: Update githubactions
-    policy: ghcr.io/updatecli/policies/autodiscovery/githubaction:0.3.0@sha256:3b5425da2a2a2b89bb69463f1294704c33730358c66140efb93cab14b2868b06
-    values:
-      - updatecli/values.d/scm.yaml
-      - updatecli/values.d/githubactions.yaml
   - name: Rust
-    policy: ghcr.io/updatecli/policies/autodiscovery/cargo:0.8.0@sha256:e8364d9b3ad486c3e1144a97d66bebb0718583525879936c8a6c537922741d67
+    policy: ghcr.io/updatecli/policies/autodiscovery/cargo:0.7.1@sha256:5df42401067e344e85eef4a63d9f03e80099709f7832d49562164bec1fac1a2e
     values:
       - updatecli/values.d/scm.yaml
+  - name: Update githubactions
+    policy: ghcr.io/updatecli/policies/autodiscovery/githubaction:0.2.1@sha256:cfddec11464cc09615135f0f1e069f00ad24d28edc7cc6a4e8224e04c3699008
+    values:
+      - updatecli/values.d/scm.yaml
+      - updatecli/values.d/digest.yaml
+      - updatecli/values.d/githubactions.yaml
+  - name: Update precommit
+    policy: ghcr.io/updatecli/policies/autodiscovery/precommit:0.3.0@sha256:73b4e3ef11538afa83d12f25a642d574407e4f04703beb22ef5f6111e641d386
+    values:
+      - updatecli/values.d/scm.yaml
+      - updatecli/values.d/digest.yaml

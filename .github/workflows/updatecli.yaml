@@ -9,6 +9,9 @@ on:
   schedule:
     # Run every day
     - cron: "0 0 * * *"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 permissions: {}
 jobs:
   updatecli:
