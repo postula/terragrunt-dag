@@ -1,0 +1,47 @@
+# Pre-commit hooks for terragrunt-dag
+# Install pre-commit: pip install pre-commit
+# Install hooks: pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # General file cleanup
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+
+  # Rust formatting
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+        name: cargo fmt
+        description: Run cargo fmt on Rust code
+        args: ['--manifest-path', 'Cargo.toml', '--']
+
+      - id: clippy
+        name: cargo clippy
+        description: Run cargo clippy for linting
+        args: ['--manifest-path', 'Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings']
+
+      - id: cargo-check
+        name: cargo check
+        description: Run cargo check to verify compilation
+        args: ['--manifest-path', 'Cargo.toml', '--all-features']
+
+  # Run tests (commented out by default as it can be slow)
+  # Uncomment if you want tests to run on every commit
+  # - repo: local
+  #   hooks:
+  #     - id: cargo-test
+  #       name: cargo test
+  #       description: Run cargo test
+  #       entry: cargo test --all-features
+  #       language: system
+  #       types: [rust]
+  #       pass_filenames: false
