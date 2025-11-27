@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+  merge_group:
   pull_request:
     branches:
       - main
@@ -34,6 +35,6 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --all-features --verbose
+        run: cargo test --all-features
       - name: Build release binary
-        run: cargo build --release --verbose
+        run: cargo build --release
