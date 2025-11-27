@@ -9,9 +9,7 @@ on:
   schedule:
     # Run every day
     - cron: "0 0 * * *"
-
 permissions: {}
-
 jobs:
   updatecli:
     runs-on: ubuntu-latest
@@ -19,7 +17,7 @@ jobs:
       contents: read
     steps:
       - name: "Checkout"
-        uses: "actions/checkout@v4.2.2"
+        uses: "actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3" # v6.0.0
       - name: "Setup updatecli"
         uses: "updatecli/updatecli-action@v2"
       - name: "Run updatecli"
