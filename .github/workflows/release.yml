@@ -103,7 +103,7 @@ jobs:
           }
         shell: pwsh
       - name: Upload release archive
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@5be0e66d93ac7ed76da52eca8bb058f665c3a5fe # v2.4.2
         with:
           files: |
             terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
