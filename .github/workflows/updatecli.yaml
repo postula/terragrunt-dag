@@ -4,8 +4,6 @@ on:
   workflow_dispatch: null
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   schedule:
     # Run every day
     - cron: "0 0 * * *"
