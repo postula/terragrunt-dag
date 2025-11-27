@@ -72,6 +72,8 @@ pub struct ExtractedDep {
 pub struct TerragruntConfig {
     /// All extracted dependencies (projects, includes, watch files, etc.)
     pub deps: Vec<ExtractedDep>,
+    /// Whether this config has a terraform block (with or without source)
+    pub has_terraform_block: bool,
 }
 
 /// Parse a terragrunt.hcl file
@@ -100,6 +102,10 @@ pub fn parse_terragrunt_file(path: &camino::Utf8Path) -> Result<TerragruntConfig
                 }
             }
             "terraform" => {
+                // Mark that we found a terraform block (with or without source)
+                config.has_terraform_block = true;
+
+                // Extract source dependency if present
                 if let Some(dep) = extract_terraform_block(block) {
                     config.deps.push(dep);
                 }
@@ -805,6 +811,40 @@ mod tests {
 
         // terraform block without source should not add any deps
         assert_eq!(config.deps.len(), 0);
+
+        // But it should mark that a terraform block exists
+        assert!(
+            config.has_terraform_block,
+            "terraform block without source should still set has_terraform_block=true"
+        );
+    }
+
+    #[test]
+    fn test_parse_terraform_local_source_sets_flag() {
+        let path = fixture_path("terraform_local_source");
+        let config = parse_terragrunt_file(&path).expect("should parse successfully");
+
+        // Should have terraform source dependency
+        assert_eq!(config.deps.len(), 1);
+
+        // Should also set has_terraform_block
+        assert!(
+            config.has_terraform_block,
+            "terraform block with source should set has_terraform_block=true"
+        );
+    }
+
+    #[test]
+    fn test_parse_without_terraform_block() {
+        let path = fixture_path("simple_dependency");
+        let config = parse_terragrunt_file(&path).expect("should parse successfully");
+
+        // Should have dependency but NO terraform block
+        assert_eq!(config.deps.len(), 1);
+        assert!(
+            !config.has_terraform_block,
+            "config without terraform block should have has_terraform_block=false"
+        );
     }
 
     // ============== locals block tests ==============

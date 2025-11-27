@@ -43,9 +43,9 @@ struct Cli {
     #[arg(long, default_value = "terragrunt")]
     workflow: String,
 
-    /// Workspace name (for Atlantis/Digger output)
-    #[arg(long, default_value = "default")]
-    workspace: String,
+    /// Workspace name override (for Atlantis/Digger output). If not set, uses project name.
+    #[arg(long)]
+    workspace: Option<String>,
 
     /// Enable autoplan in Atlantis output (default: true)
     #[arg(long, default_value_t = true)]
@@ -58,6 +58,11 @@ struct Cli {
     /// Enable parallel apply in Atlantis output (default: false)
     #[arg(long, default_value_t = false)]
     parallel_apply: bool,
+
+    /// When true, dependencies cascade to include all transitive dependencies.
+    /// Use --no-cascade-dependencies to disable (default: true)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    cascade_dependencies: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -131,7 +136,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 3: Process projects with caching
     let cache = ParseCache::new();
-    let results = process_all_projects(filtered_paths, &cache);
+    let results = process_all_projects(filtered_paths, &cache, cli.cascade_dependencies);
 
     if cli.verbose {
         let (cache_entries, cache_deps) = cache.stats();
@@ -144,10 +149,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Step 4: Collect successful projects and report errors
     let mut projects = Vec::new();
     let mut errors = Vec::new();
+    let mut filtered_no_terraform = 0;
 
     for result in results {
         match result {
-            ProjectResult::Ok(project) => projects.push(project),
+            ProjectResult::Ok(project) => {
+                // Filter out projects without terraform source
+                if project.has_terraform_source {
+                    projects.push(project);
+                } else {
+                    filtered_no_terraform += 1;
+                    if cli.verbose {
+                        eprintln!("Filtered out project (no terraform block): {}", project.dir);
+                    }
+                }
+            }
             ProjectResult::Err { path, error } => {
                 errors.push((path, error));
             }
@@ -164,6 +180,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if cli.verbose {
         eprintln!("Successfully processed {} projects", projects.len());
+        if filtered_no_terraform > 0 {
+            eprintln!(
+                "Filtered out {} projects without terraform source",
+                filtered_no_terraform
+            );
+        }
     }
 
     // Step 5: Generate output
@@ -180,7 +202,7 @@ fn build_output_config(cli: &Cli) -> OutputConfig {
         base_dir: cli.base_dir.clone().or_else(|| Some(cli.root.clone())),
         terraform_version: cli.terraform_version.clone(),
         workflow: Some(cli.workflow.clone()),
-        workspace: Some(cli.workspace.clone()),
+        workspace: cli.workspace.clone(), // None means derive from project name
         include_self_in_watch: true,
         autoplan_enabled: cli.autoplan,
         automerge: cli.automerge,

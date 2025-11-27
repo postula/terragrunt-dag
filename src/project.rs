@@ -14,4 +14,9 @@ pub struct Project {
     pub project_dependencies: Vec<String>,
     /// Files/directories to watch for changes
     pub watch_files: Vec<Utf8PathBuf>,
+    /// Whether this project has a terraform block (with or without source attribute)
+    /// Projects with terraform blocks are valid - they may use generate blocks or have source.
+    /// Projects without terraform blocks should be filtered out for Atlantis/Digger.
+    #[serde(skip_serializing)]
+    pub has_terraform_source: bool,
 }

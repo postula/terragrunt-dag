@@ -3,7 +3,7 @@
 use crate::Project;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use thiserror::Error;
 
 /// Compute execution order layers from project dependencies.
@@ -11,11 +11,18 @@ use thiserror::Error;
 ///
 /// Layer 0 = no dependencies (can run first, in parallel)
 /// Layer N = depends only on projects in layers 0..N-1
-fn compute_layers(projects: &[Project]) -> HashMap<String, u32> {
+///
+/// Dependencies in projects are absolute paths, so we need to convert them
+/// to names using base_dir before comparison.
+fn compute_layers(projects: &[Project], _base_dir: Option<&Utf8PathBuf>) -> HashMap<String, u32> {
     let mut layers: HashMap<String, u32> = HashMap::new();
 
-    // Build a set of all project names for validation
-    let project_names: HashSet<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+    // Build a mapping from absolute path to project name
+    // This allows us to look up dependency paths and find their project names
+    let mut path_to_name: HashMap<String, String> = HashMap::new();
+    for p in projects {
+        path_to_name.insert(p.dir.to_string(), p.name.clone());
+    }
 
     // Iteratively assign layers
     let mut changed = true;
@@ -27,27 +34,24 @@ fn compute_layers(projects: &[Project]) -> HashMap<String, u32> {
                 continue;
             }
 
-            // Check if all dependencies have been assigned layers
-            let deps_layers: Option<Vec<u32>> = project
+            // Convert dependency paths to names for comparison
+            let dep_names: Vec<String> = project
                 .project_dependencies
                 .iter()
-                .filter(|dep| project_names.contains(dep.as_str())) // Only known deps
-                .map(|dep| layers.get(dep).copied())
+                .filter_map(|dep_path| path_to_name.get(dep_path).cloned())
+                .collect();
+
+            // Check if all dependencies have been assigned layers
+            let deps_layers: Option<Vec<u32>> = dep_names
+                .iter()
+                .map(|dep_name| layers.get(dep_name).copied())
                 .collect();
 
             match deps_layers {
-                Some(dep_layers)
-                    if project.project_dependencies.is_empty()
-                        || dep_layers.len()
-                            == project
-                                .project_dependencies
-                                .iter()
-                                .filter(|d| project_names.contains(d.as_str()))
-                                .count() =>
-                {
+                Some(dep_layers) if dep_names.is_empty() || dep_layers.len() == dep_names.len() => {
                     // All deps resolved (or no deps) - assign layer
                     let max_dep_layer = dep_layers.into_iter().max().unwrap_or(0);
-                    let my_layer = if project.project_dependencies.is_empty() {
+                    let my_layer = if dep_names.is_empty() {
                         0
                     } else {
                         max_dep_layer + 1
@@ -167,6 +171,19 @@ fn derive_name_from_dir(relative_dir: &str) -> String {
     relative_dir.replace(['/', '\\'], "_")
 }
 
+/// Convert a dependency path (absolute) to a dependency name using base_dir.
+///
+/// Dependencies are stored as absolute paths in Project.project_dependencies.
+/// This function converts them to names by making them relative to base_dir
+/// and then deriving a name from the relative path.
+///
+/// If base_dir is None, tries to use the path as-is.
+fn dependency_path_to_name(dep_path: &str, base_dir: Option<&camino::Utf8Path>) -> String {
+    let dep_path_buf = Utf8PathBuf::from(dep_path);
+    let relative = make_relative(&dep_path_buf, base_dir);
+    derive_name_from_dir(&relative)
+}
+
 /// Generic output format for JSON/YAML
 #[derive(Serialize)]
 struct GenericOutput {
@@ -233,10 +250,17 @@ fn to_generic_project(project: &Project, config: &OutputConfig) -> GenericProjec
     let dir = make_relative(&project.dir, config.base_dir.as_deref());
     let name = derive_name_from_dir(&dir);
 
+    // Convert dependency paths to names
+    let dependencies: Vec<String> = project
+        .project_dependencies
+        .iter()
+        .map(|dep_path| dependency_path_to_name(dep_path, config.base_dir.as_deref()))
+        .collect();
+
     GenericProject {
         name,
         dir,
-        dependencies: project.project_dependencies.clone(),
+        dependencies,
         watch_files: project
             .watch_files
             .iter()
@@ -342,7 +366,7 @@ fn compute_relative_path(from_dir: &camino::Utf8Path, to_path: &camino::Utf8Path
 /// Generate Atlantis YAML output
 fn generate_atlantis(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
     // Compute layers using internal project names
-    let layers = compute_layers(projects);
+    let layers = compute_layers(projects, config.base_dir.as_ref());
 
     // Build a mapping from internal name to relative-dir-based name
     let mut name_mapping: HashMap<String, String> = HashMap::new();
@@ -412,7 +436,7 @@ fn generate_atlantis(projects: &[Project], config: &OutputConfig) -> Result<Stri
 /// Generate Digger YAML output
 fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
     // Compute layers using internal project names
-    let layers = compute_layers(projects);
+    let layers = compute_layers(projects, config.base_dir.as_ref());
 
     let digger_projects: Vec<DiggerProject> = projects
         .iter()
@@ -447,6 +471,13 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
             // Get layer using internal name, default to 0 if not found
             let layer = layers.get(&p.name).copied().unwrap_or(0);
 
+            // Convert dependency paths to names
+            let depends_on: Vec<String> = p
+                .project_dependencies
+                .iter()
+                .map(|dep_path| dependency_path_to_name(dep_path, config.base_dir.as_deref()))
+                .collect();
+
             DiggerProject {
                 name: name.clone(),
                 dir,
@@ -458,7 +489,7 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
                     .clone()
                     .unwrap_or_else(|| "default".to_string()),
                 include_patterns,
-                depends_on: p.project_dependencies.clone(),
+                depends_on,
                 layer,
             }
         })
@@ -494,17 +525,24 @@ mod tests {
             Project {
                 name: "prod_vpc".to_string(),
                 dir: Utf8PathBuf::from("/repo/live/prod/vpc"),
-                project_dependencies: vec!["prod_network".to_string()],
+                // Dependencies are now absolute paths
+                project_dependencies: vec!["/repo/live/prod/network".to_string()],
                 watch_files: vec![
                     Utf8PathBuf::from("/repo/live/common/root.hcl"),
                     Utf8PathBuf::from("/repo/modules/vpc/main.tf"),
                 ],
+                has_terraform_source: true,
             },
             Project {
                 name: "prod_app".to_string(),
                 dir: Utf8PathBuf::from("/repo/live/prod/app"),
-                project_dependencies: vec!["prod_vpc".to_string(), "prod_rds".to_string()],
+                // Dependencies are now absolute paths
+                project_dependencies: vec![
+                    "/repo/live/prod/vpc".to_string(),
+                    "/repo/live/prod/rds".to_string(),
+                ],
                 watch_files: vec![Utf8PathBuf::from("/repo/live/common/root.hcl")],
+                has_terraform_source: true,
             },
         ]
     }
@@ -703,6 +741,7 @@ mod tests {
                 Utf8PathBuf::from("/repo/root.hcl"),
                 Utf8PathBuf::from("/repo/live/common.hcl"),
             ],
+            has_terraform_source: true,
         }];
         let config = OutputConfig {
             base_dir: Some(Utf8PathBuf::from("/repo")),
@@ -761,6 +800,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/standalone"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig::default();
 
@@ -787,16 +827,18 @@ mod tests {
                 dir: Utf8PathBuf::from("/a"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "b".to_string(),
                 dir: Utf8PathBuf::from("/b"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
 
-        let layers = compute_layers(&projects);
+        let layers = compute_layers(&projects, None);
 
         assert_eq!(layers.get("a"), Some(&0));
         assert_eq!(layers.get("b"), Some(&0));
@@ -805,28 +847,32 @@ mod tests {
     #[test]
     fn test_compute_layers_chain() {
         // a -> b -> c (chain dependency)
+        // Dependencies are now absolute paths
         let projects = vec![
             Project {
                 name: "a".to_string(),
                 dir: Utf8PathBuf::from("/a"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "b".to_string(),
                 dir: Utf8PathBuf::from("/b"),
-                project_dependencies: vec!["a".to_string()],
+                project_dependencies: vec!["/a".to_string()], // Absolute path
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "c".to_string(),
                 dir: Utf8PathBuf::from("/c"),
-                project_dependencies: vec!["b".to_string()],
+                project_dependencies: vec!["/b".to_string()], // Absolute path
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
 
-        let layers = compute_layers(&projects);
+        let layers = compute_layers(&projects, None);
 
         assert_eq!(layers.get("a"), Some(&0));
         assert_eq!(layers.get("b"), Some(&1));
@@ -840,34 +886,39 @@ mod tests {
         //   b   c
         //    \ /
         //     d
+        // Dependencies are now absolute paths
         let projects = vec![
             Project {
                 name: "a".to_string(),
                 dir: Utf8PathBuf::from("/a"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "b".to_string(),
                 dir: Utf8PathBuf::from("/b"),
-                project_dependencies: vec!["a".to_string()],
+                project_dependencies: vec!["/a".to_string()],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "c".to_string(),
                 dir: Utf8PathBuf::from("/c"),
-                project_dependencies: vec!["a".to_string()],
+                project_dependencies: vec!["/a".to_string()],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "d".to_string(),
                 dir: Utf8PathBuf::from("/d"),
-                project_dependencies: vec!["b".to_string(), "c".to_string()],
+                project_dependencies: vec!["/b".to_string(), "/c".to_string()],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
 
-        let layers = compute_layers(&projects);
+        let layers = compute_layers(&projects, None);
 
         assert_eq!(layers.get("a"), Some(&0));
         assert_eq!(layers.get("b"), Some(&1));
@@ -878,22 +929,25 @@ mod tests {
     #[test]
     fn test_compute_layers_unknown_dependencies() {
         // Project with dependency on non-existent project
+        // Dependencies are now absolute paths
         let projects = vec![
             Project {
                 name: "a".to_string(),
                 dir: Utf8PathBuf::from("/a"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "b".to_string(),
                 dir: Utf8PathBuf::from("/b"),
-                project_dependencies: vec!["a".to_string(), "nonexistent".to_string()],
+                project_dependencies: vec!["/a".to_string(), "/nonexistent".to_string()],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
 
-        let layers = compute_layers(&projects);
+        let layers = compute_layers(&projects, None);
 
         // Unknown dependencies should be ignored
         assert_eq!(layers.get("a"), Some(&0));
@@ -908,12 +962,14 @@ mod tests {
                 dir: Utf8PathBuf::from("/repo/vpc"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "app".to_string(),
                 dir: Utf8PathBuf::from("/repo/app"),
-                project_dependencies: vec!["vpc".to_string()],
+                project_dependencies: vec!["/repo/vpc".to_string()], // Absolute path
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
         let config = OutputConfig::default();
@@ -948,12 +1004,14 @@ mod tests {
                 dir: Utf8PathBuf::from("/repo/vpc"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "app".to_string(),
                 dir: Utf8PathBuf::from("/repo/app"),
-                project_dependencies: vec!["vpc".to_string()],
+                project_dependencies: vec!["/repo/vpc".to_string()], // Absolute path
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
         let config = OutputConfig::default();
@@ -1030,6 +1088,7 @@ mod tests {
                 Utf8PathBuf::from("/repo/root.hcl"),
                 Utf8PathBuf::from("/repo/live/common.hcl"),
             ],
+            has_terraform_source: true,
         }];
         let config = OutputConfig {
             base_dir: Some(Utf8PathBuf::from("/repo")),
@@ -1095,12 +1154,14 @@ mod tests {
                 dir: Utf8PathBuf::from("/repo/alarm_topic"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "also_wrong".to_string(),
                 dir: Utf8PathBuf::from("/repo/apps/pass/ecs_service"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
         let config = OutputConfig {
@@ -1126,6 +1187,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/alarm_topic"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig {
             base_dir: Some(Utf8PathBuf::from("/repo")),
@@ -1150,12 +1212,14 @@ mod tests {
                 dir: Utf8PathBuf::from("/repo/alarm_topic"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
             Project {
                 name: "ignored2".to_string(),
                 dir: Utf8PathBuf::from("/repo/apps/pass"),
                 project_dependencies: vec![],
                 watch_files: vec![],
+                has_terraform_source: true,
             },
         ];
         let config = OutputConfig {
@@ -1181,6 +1245,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/test"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig {
             autoplan_enabled: false,
@@ -1200,6 +1265,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/test"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig::default();
 
@@ -1216,6 +1282,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/test"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig::default();
 
@@ -1232,6 +1299,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/test"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig {
             automerge: true,
@@ -1251,6 +1319,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/test"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig::default();
 
@@ -1267,6 +1336,7 @@ mod tests {
             dir: Utf8PathBuf::from("/repo/test"),
             project_dependencies: vec![],
             watch_files: vec![],
+            has_terraform_source: true,
         }];
         let config = OutputConfig {
             parallel_apply: true,
