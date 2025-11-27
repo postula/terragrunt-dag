@@ -9,7 +9,7 @@
   rayon = "1.11.0"
   serde_json = "1.0.145"
   serde_yaml = "0.9.34+deprecated"
-  thiserror = "2"
+  thiserror = "2.0.17"
   walkdir = "2"
 
   [dependencies.camino]
