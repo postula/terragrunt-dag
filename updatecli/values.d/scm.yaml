@@ -1,0 +1,8 @@
+scm:
+  commitusingapi: true
+  enabled: true
+  user: loisbot
+  email: bot@postu.la
+  owner: postula
+  repository: terragrunt-dag
+  branch: main

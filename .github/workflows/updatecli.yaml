@@ -1,0 +1,30 @@
+name: updatecli
+on:
+  release: null
+  workflow_dispatch: null
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run every day
+    - cron: "0 0 * * *"
+
+permissions: {}
+
+jobs:
+  updatecli:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: "Checkout"
+        uses: "actions/checkout@v4.2.2"
+      - name: "Setup updatecli"
+        uses: "updatecli/updatecli-action@v2"
+      - name: "Run updatecli"
+        run: "updatecli compose ${{ github.ref == 'refs/heads/main' && 'apply --clean-git-branches' || 'diff' }}"
+        env:
+          UPDATECLI_GITHUB_APP_CLIENT_ID: ${{ secrets.LOIS_BOT_APP_ID }}
+          UPDATECLI_GITHUB_APP_INSTALLATION_ID: ${{ secrets.LOIS_BOT_APP_INSTALLATION_ID }}
+          UPDATECLI_GITHUB_APP_PRIVATE_KEY: ${{ secrets.LOIS_BOT_PRIVATE_KEY }}
