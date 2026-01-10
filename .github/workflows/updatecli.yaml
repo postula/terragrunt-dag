@@ -20,7 +20,7 @@ jobs:
       - name: "Checkout"
         uses: "actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8" # v6.0.1
       - name: "Setup updatecli"
-        uses: "updatecli/updatecli-action@8f0738d06280ebe457c8d044993d707e1358aacb" # v2
+        uses: "updatecli/updatecli-action@f05f80a885fb5ecb8a02af798131e8e2c8c73939" # v2
       - name: "Run updatecli"
         run: "updatecli compose ${{ github.ref == 'refs/heads/main' && 'apply --clean-git-branches' || 'diff' }}"
         env:
