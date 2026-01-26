@@ -305,8 +305,25 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
             }
             DependencyKind::Project => {
                 // Resolve NOW with correct context
+                // Use resolve_all to handle conditional expressions (both branches)
                 // Store absolute path as string - output module will convert to name
-                if let Some(resolved) = resolve_ctx.resolve(&dep.path) {
+                for resolved in resolve_ctx.resolve_all(&dep.path) {
+                    // Skip empty paths and paths that don't look like valid projects
+                    // (conditional deps often have "" as fallback)
+                    if resolved.as_str().is_empty() {
+                        continue;
+                    }
+
+                    // Skip if this resolves to the config directory itself (empty path resolution)
+                    if resolved == config_dir {
+                        continue;
+                    }
+
+                    // Skip self-references (project depending on itself)
+                    if resolved == ctx.project_dir {
+                        continue;
+                    }
+
                     ctx.project_dependencies.push(resolved.to_string());
 
                     // Add the dependency's files to watch files so changes trigger this project

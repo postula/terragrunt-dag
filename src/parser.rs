@@ -38,6 +38,12 @@ pub enum PathExpr {
     },
     /// String interpolation: "${get_repo_root()}/modules/vpc"
     Interpolation(Vec<PathExpr>),
+    /// Conditional expression: condition ? true_branch : false_branch
+    /// We extract both branches since we can't evaluate the condition at parse time
+    Conditional {
+        true_branch: Box<PathExpr>,
+        false_branch: Box<PathExpr>,
+    },
     /// Function we can't evaluate
     Unresolvable {
         func: String,
@@ -427,6 +433,17 @@ fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
             // Template expressions like "${get_repo_root()}/modules/vpc"
             // Parse the template into an Interpolation with multiple parts
             extract_template_expr(template)
+        }
+
+        hcl::Expression::Conditional(cond) => {
+            // Conditional expressions: condition ? true_val : false_val
+            // We can't evaluate the condition at parse time, so extract both branches
+            let true_branch = Box::new(extract_path_expr(&cond.true_expr));
+            let false_branch = Box::new(extract_path_expr(&cond.false_expr));
+            PathExpr::Conditional {
+                true_branch,
+                false_branch,
+            }
         }
 
         // For other expressions, mark as unresolvable

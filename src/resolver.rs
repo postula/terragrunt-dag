@@ -38,39 +38,49 @@ impl ResolveContext {
 
     /// Resolve a PathExpr to an actual filesystem path.
     /// Returns None if the path cannot be resolved.
+    /// For conditional expressions, returns the first resolved path.
     pub fn resolve(&self, path_expr: &PathExpr) -> Option<Utf8PathBuf> {
+        self.resolve_all(path_expr).into_iter().next()
+    }
+
+    /// Resolve a PathExpr to all possible filesystem paths.
+    /// For conditional expressions, returns both branches.
+    /// Returns empty Vec if no paths can be resolved.
+    pub fn resolve_all(&self, path_expr: &PathExpr) -> Vec<Utf8PathBuf> {
         match path_expr {
             PathExpr::Literal(path) => {
                 // Join with config dir (current file's location) and normalize
                 let resolved = self.config_dir.join(path);
-                Some(normalize_path(&resolved))
+                vec![normalize_path(&resolved)]
             }
 
             PathExpr::FindInParentFolders(filename) => {
                 // Use PROJECT dir (original terragrunt.hcl location) for find_in_parent_folders
                 // This matches terragrunt behavior where includes use the project's context
                 let filename = filename.as_deref().unwrap_or("terragrunt.hcl");
-                find_in_parent_folders(&self.project_dir, filename)
+                find_in_parent_folders(&self.project_dir, filename).into_iter().collect()
             }
 
-            PathExpr::GetRepoRoot => self.repo_root().cloned(),
+            PathExpr::GetRepoRoot => self.repo_root().cloned().into_iter().collect(),
 
-            PathExpr::GetTerragruntDir => Some(self.project_dir.clone()),
+            PathExpr::GetTerragruntDir => vec![self.project_dir.clone()],
 
             PathExpr::GetParentTerragruntDir => {
                 // Would need include context - not implemented in basic resolver
-                None
+                vec![]
             }
 
             PathExpr::PathRelativeToInclude | PathExpr::PathRelativeFromInclude => {
                 // Would need include context - not implemented in basic resolver
-                None
+                vec![]
             }
 
             PathExpr::Dirname(inner) => {
-                // Resolve the inner expression first, then get its parent directory
-                let resolved = self.resolve(inner)?;
-                resolved.parent().map(|p| p.to_path_buf())
+                // Resolve inner expression first, then get parent directory for each
+                self.resolve_all(inner)
+                    .into_iter()
+                    .filter_map(|resolved| resolved.parent().map(|p| p.to_path_buf()))
+                    .collect()
             }
 
             PathExpr::Format {
@@ -78,21 +88,30 @@ impl ResolveContext {
                 args,
             } => {
                 // Resolve all arguments first
-                let resolved_args: Vec<String> =
-                    args.iter().map(|arg| self.resolve(arg).map(|p| p.to_string())).collect::<Option<Vec<_>>>()?;
+                let resolved_args: Option<Vec<String>> =
+                    args.iter().map(|arg| self.resolve(arg).map(|p| p.to_string())).collect();
 
-                // Replace %s placeholders with resolved arguments
-                let mut result = fmt.clone();
-                for arg in resolved_args {
-                    // Replace first occurrence of %s with the argument
-                    if let Some(pos) = result.find("%s") {
-                        result.replace_range(pos..pos + 2, &arg);
+                match resolved_args {
+                    Some(args) => {
+                        // Replace %s placeholders with resolved arguments
+                        let mut result = fmt.clone();
+                        for arg in args {
+                            // Replace first occurrence of %s with the argument
+                            if let Some(pos) = result.find("%s") {
+                                result.replace_range(pos..pos + 2, &arg);
+                            }
+                        }
+                        // If result is a relative path, join with config_dir
+                        // If it's already absolute (starts with /), normalize directly
+                        let path = if result.starts_with('/') {
+                            Utf8PathBuf::from(result)
+                        } else {
+                            self.config_dir.join(&result)
+                        };
+                        vec![normalize_path(&path)]
                     }
+                    None => vec![],
                 }
-
-                // Parse result as a path and normalize
-                let path = Utf8PathBuf::from(result);
-                Some(normalize_path(&path))
             }
 
             PathExpr::Interpolation(parts) => {
@@ -100,7 +119,7 @@ impl ResolveContext {
                 // IMPORTANT: Literals within interpolations are string fragments,
                 // not full paths to be resolved. Only function calls get resolved.
                 if parts.is_empty() {
-                    return None;
+                    return vec![];
                 }
 
                 let mut result = String::new();
@@ -117,7 +136,7 @@ impl ResolveContext {
                                 result.push_str(resolved.as_str());
                             }
                             None => {
-                                return None;
+                                return vec![];
                             }
                         },
                     }
@@ -125,14 +144,24 @@ impl ResolveContext {
 
                 // Parse the concatenated result as a path and normalize it
                 let path = Utf8PathBuf::from(result);
-                Some(normalize_path(&path))
+                vec![normalize_path(&path)]
+            }
+
+            PathExpr::Conditional {
+                true_branch,
+                false_branch,
+            } => {
+                // Resolve both branches since we can't evaluate the condition
+                let mut results = self.resolve_all(true_branch);
+                results.extend(self.resolve_all(false_branch));
+                results
             }
 
             PathExpr::Unresolvable {
                 ..
             } => {
-                // Can't resolve - return None
-                None
+                // Can't resolve - return empty vec
+                vec![]
             }
         }
     }

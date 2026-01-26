@@ -3,6 +3,7 @@
 //! This crate provides tools to parse terragrunt monorepos and output
 //! project dependencies in various formats (JSON, YAML, Atlantis, Digger).
 
+pub mod cycle;
 pub mod discovery;
 pub mod output;
 pub mod parser;
@@ -11,6 +12,7 @@ pub mod project;
 pub mod resolver;
 
 // Re-export main types for convenience
+pub use cycle::{Cycle, CycleDetectionResult, DependencyEdge, EdgeType, analyze_cycles, detect_cycles, report_cycles};
 pub use output::{OutputConfig, OutputError, OutputFormat, generate_output};
 pub use processor::{ParseCache, ProcessError, ProjectResult, process_all_projects};
 pub use project::Project;
