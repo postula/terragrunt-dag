@@ -106,3 +106,32 @@ jobs:
             terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stash archive for checksums job
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        with:
+          name: archive-${{ matrix.target }}
+          path: terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}
+          retention-days: 1
+  checksums:
+    name: Generate SHA256SUMS
+    runs-on: ubuntu-latest
+    needs: build-release
+    steps:
+      - name: Download all release archives
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: archive-*
+          path: archives
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        run: |
+          cd archives
+          sha256sum *.tar.gz > ../SHA256SUMS
+          cd ..
+          cat SHA256SUMS
+      - name: Upload SHA256SUMS to release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          files: SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -135,8 +135,7 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
         return Err(format!("Root directory does not exist: {}", root).into());
     }
 
-    let root = root.canonicalize_utf8()
-        .map_err(|e| format!("Failed to canonicalize root directory: {}", e))?;
+    let root = root.canonicalize_utf8().map_err(|e| format!("Failed to canonicalize root directory: {}", e))?;
 
     if cli.verbose {
         eprintln!("Scanning directory: {}", root);
@@ -182,7 +181,10 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
                     }
                 }
             }
-            ProjectResult::Err { path, error } => {
+            ProjectResult::Err {
+                path,
+                error,
+            } => {
                 errors.push((path, error));
             }
         }
@@ -202,7 +204,10 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
         }
     }
 
-    Ok(DiscoveredProjects { root, projects })
+    Ok(DiscoveredProjects {
+        root,
+        projects,
+    })
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -237,9 +242,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn build_output_config(cli: &Cli, root: &Utf8PathBuf) -> Result<OutputConfig, Box<dyn std::error::Error>> {
     Ok(OutputConfig {
-        base_dir: cli.base_dir.as_ref()
-            .map(|p| p.canonicalize_utf8()
-                .map_err(|e| format!("Failed to canonicalize base directory '{}': {}", p, e)))
+        base_dir: cli
+            .base_dir
+            .as_ref()
+            .map(|p| p.canonicalize_utf8().map_err(|e| format!("Failed to canonicalize base directory '{}': {}", p, e)))
             .transpose()?
             .or_else(|| Some(root.clone())),
         terraform_version: cli.terraform_version.clone(),
