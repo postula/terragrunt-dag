@@ -20,7 +20,7 @@ policies:
       - updatecli/values.d/digest.yaml
       - updatecli/values.d/githubactions.yaml
   - name: Update precommit
-    policy: ghcr.io/updatecli/policies/autodiscovery/precommit:0.3.0@sha256:73b4e3ef11538afa83d12f25a642d574407e4f04703beb22ef5f6111e641d386
+    policy: ghcr.io/updatecli/policies/autodiscovery/precommit:0.4.1@sha256:c8a92f49f7d79363c1549d0f536afeb56d331bfaf64aef5b528dec2c60bb7129
     values:
       - updatecli/values.d/scm.yaml
       - updatecli/values.d/digest.yaml
