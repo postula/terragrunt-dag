@@ -5,7 +5,7 @@
 
 [dependencies]
   glob = "0.3.3"
-  hcl-rs = "0.19.6"
+  hcl-rs = "0.19.7"
   rayon = "1.11.0"
   serde_json = "1.0.149"
   serde_yaml = "0.9.34+deprecated"
