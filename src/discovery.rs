@@ -1,30 +1,69 @@
-//! Find terragrunt.hcl files in a directory tree.
+//! Find terragrunt.hcl and terragrunt.stack.hcl files in a directory tree.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use std::io::Result;
 use walkdir::{DirEntry, WalkDir};
 
-/// Directories to skip during discovery
+/// Directories to skip during discovery.
+/// Note: `.terragrunt-stack` is intentionally NOT in this list so generated
+/// stack units can be discovered when present.
 const IGNORED_DIRS: &[&str] =
     &[".terragrunt-cache", ".terraform", ".git", "node_modules", ".venv", "venv", "__pycache__"];
 
 fn is_ignored(entry: &DirEntry) -> bool {
-    entry.file_name().to_str().map(|s| IGNORED_DIRS.contains(&s) || s.starts_with('.')).unwrap_or(false)
+    entry.file_name().to_str().map(|s| IGNORED_DIRS.contains(&s)).unwrap_or(false)
 }
 
-/// Discovers all terragrunt.hcl files under the given root directory.
-pub fn discover_projects(root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+/// Files discovered by a single tree walk.
+pub struct DiscoveredFiles {
+    /// Directories containing a `terragrunt.hcl` file
+    pub units: Vec<Utf8PathBuf>,
+    /// Paths to `terragrunt.stack.hcl` files
+    pub stack_files: Vec<Utf8PathBuf>,
+}
+
+/// Discover all `terragrunt.hcl` and `terragrunt.stack.hcl` files under `root`.
+pub fn discover_files(root: &Utf8Path) -> Result<DiscoveredFiles> {
     if !root.exists() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("root path does not exist: {}", root)));
     }
-    Ok(WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !is_ignored(e))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name() == "terragrunt.hcl")
-        .filter_map(|e| Utf8PathBuf::from_path_buf(e.into_path()).ok())
-        .map(|p| p.parent().unwrap().to_owned())
-        .collect())
+
+    let mut units = Vec::new();
+    let mut stack_files = Vec::new();
+
+    for entry in WalkDir::new(root).into_iter().filter_entry(|e| !is_ignored(e)).filter_map(|e| e.ok()) {
+        let Some(file_name) = entry.file_name().to_str() else {
+            continue;
+        };
+
+        match file_name {
+            "terragrunt.hcl" => {
+                if let Some(path) =
+                    Utf8PathBuf::from_path_buf(entry.into_path()).ok().and_then(|p| p.parent().map(|p| p.to_owned()))
+                {
+                    units.push(path);
+                }
+            }
+            "terragrunt.stack.hcl" => {
+                if let Ok(path) = Utf8PathBuf::from_path_buf(entry.into_path()) {
+                    stack_files.push(path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(DiscoveredFiles {
+        units,
+        stack_files,
+    })
+}
+
+/// Discover all `terragrunt.hcl` directories under `root`.
+///
+/// Retained as a convenience wrapper for callers/tests that don't need stacks.
+pub fn discover_projects(root: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    Ok(discover_files(root)?.units)
 }
 
 #[cfg(test)]

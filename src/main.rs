@@ -6,10 +6,11 @@ use std::io;
 use std::process::ExitCode;
 
 use terragrunt_dag::cycle::{DependencyEdge, EdgeType, analyze_cycles, detect_cycles, report_cycles};
-use terragrunt_dag::discovery::discover_projects;
+use terragrunt_dag::discovery::discover_files;
 use terragrunt_dag::output::{OutputConfig, OutputFormat, generate_output};
 use terragrunt_dag::processor::{ParseCache, ProjectResult, process_all_projects};
 use terragrunt_dag::project::Project;
+use terragrunt_dag::stack;
 
 #[derive(Parser)]
 #[command(name = "terragrunt-dag")]
@@ -141,23 +142,33 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
         eprintln!("Scanning directory: {}", root);
     }
 
-    let project_paths = discover_projects(&root)?;
+    let discovered = discover_files(&root)?;
 
     if cli.verbose {
-        eprintln!("Found {} terragrunt projects", project_paths.len());
+        eprintln!(
+            "Found {} terragrunt projects and {} stack files",
+            discovered.units.len(),
+            discovered.stack_files.len()
+        );
+    }
+
+    let cache = ParseCache::new();
+    let expanded = stack::expand(discovered.units, &discovered.stack_files, &cache);
+
+    if cli.verbose && !expanded.synthetic_projects.is_empty() {
+        eprintln!("Expanded stacks into {} synthetic units", expanded.synthetic_projects.len());
     }
 
     let filtered_paths = if let Some(ref pattern) = cli.filter {
-        filter_projects(project_paths, pattern, &root)?
+        filter_projects(expanded.unit_dirs, pattern, &root)?
     } else {
-        project_paths
+        expanded.unit_dirs
     };
 
     if cli.verbose {
         eprintln!("Processing {} projects (after filter)", filtered_paths.len());
     }
 
-    let cache = ParseCache::new();
     let results = process_all_projects(filtered_paths, &cache, cli.cascade_dependencies);
 
     if cli.verbose {
@@ -196,6 +207,14 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
             eprintln!("  {}: {}", path, error);
         }
     }
+
+    // Append synthetic stack-generated projects (filtered by pattern if set).
+    let synthetic = if let Some(ref pattern) = cli.filter {
+        filter_synthetic(expanded.synthetic_projects, pattern, &root)?
+    } else {
+        expanded.synthetic_projects
+    };
+    projects.extend(synthetic);
 
     if cli.verbose {
         eprintln!("Successfully processed {} projects", projects.len());
@@ -276,6 +295,28 @@ fn filter_projects(
                 glob_pattern.matches(relative.as_str())
             } else {
                 glob_pattern.matches(path.as_str())
+            }
+        })
+        .collect())
+}
+
+/// Filter synthetic projects by glob pattern
+fn filter_synthetic(
+    projects: Vec<Project>,
+    pattern: &str,
+    base_dir: &Utf8PathBuf,
+) -> Result<Vec<Project>, Box<dyn std::error::Error>> {
+    use glob::Pattern;
+
+    let glob_pattern = Pattern::new(pattern)?;
+
+    Ok(projects
+        .into_iter()
+        .filter(|p| {
+            if let Ok(relative) = p.dir.strip_prefix(base_dir) {
+                glob_pattern.matches(relative.as_str())
+            } else {
+                glob_pattern.matches(p.dir.as_str())
             }
         })
         .collect())
