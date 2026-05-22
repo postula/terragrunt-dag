@@ -10,6 +10,7 @@ pub mod parser;
 pub mod processor;
 pub mod project;
 pub mod resolver;
+pub mod stack;
 
 // Re-export main types for convenience
 pub use cycle::{Cycle, CycleDetectionResult, DependencyEdge, EdgeType, analyze_cycles, detect_cycles, report_cycles};

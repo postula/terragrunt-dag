@@ -367,7 +367,7 @@ fn extract_first_arg_as_path(func_call: &hcl::expr::FuncCall) -> Option<PathExpr
 }
 
 /// Extract a PathExpr from an HCL expression
-fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
+pub(crate) fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
     match expr {
         hcl::Expression::String(s) => PathExpr::Literal(s.clone()),
 
