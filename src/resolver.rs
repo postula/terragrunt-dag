@@ -256,16 +256,40 @@ mod tests {
 
     static INIT: Once = Once::new();
 
-    /// Ensure test fixtures are set up (creates .git directories that git won't track)
+    /// Ensure test fixtures are set up at runtime.
+    ///
+    /// Several fixtures cannot be committed to the repository: `.git/` directories
+    /// would make git treat the fixture root as a submodule boundary, hiding any
+    /// committed files beneath it. Tests that exercise `find_repo_root` and
+    /// `find_in_parent_folders` therefore depend on placeholder files being
+    /// materialized here at test-run time.
     fn setup_fixtures() {
         INIT.call_once(|| {
             let manifest_dir = env!("CARGO_MANIFEST_DIR");
             let resolver_fixtures = std::path::Path::new(manifest_dir).join("tests/fixtures/resolver");
 
-            // Create .git directory for repo fixture
-            let repo_git = resolver_fixtures.join("repo/.git");
-            if !repo_git.exists() {
-                std::fs::create_dir_all(&repo_git).ok();
+            let dirs = ["repo/.git", "repo_with_template/.git"];
+            for dir in dirs {
+                let path = resolver_fixtures.join(dir);
+                if !path.exists() {
+                    std::fs::create_dir_all(&path).ok();
+                }
+            }
+
+            let files = [
+                "repo/root.hcl",
+                "repo/live/terragrunt.hcl",
+                "repo/live/prod/region.hcl",
+                "repo_with_template/root.hcl",
+            ];
+            for file in files {
+                let path = resolver_fixtures.join(file);
+                if !path.exists() {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    std::fs::write(&path, b"").ok();
+                }
             }
         });
     }
