@@ -1,5 +1,4 @@
 # Example of a valid terragrunt project using generate blocks
-# This mimics the organization.hcl pattern from mbrella/infra
 
 terraform {}
 
