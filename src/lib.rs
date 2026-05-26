@@ -3,6 +3,7 @@
 //! This crate provides tools to parse terragrunt monorepos and output
 //! project dependencies in various formats (JSON, YAML, Atlantis, Digger).
 
+pub mod changes;
 pub mod cycle;
 pub mod discovery;
 pub mod output;

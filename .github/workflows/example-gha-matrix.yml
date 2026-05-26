@@ -1,0 +1,293 @@
+name: Example - GHA matrix
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  merge_group:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Build terragrunt-dag binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: true
+      - name: Build release binary
+        run: cargo build --release
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: terragrunt-dag-bin
+          path: target/release/terragrunt-dag
+          retention-days: 1
+
+  plan-matrix:
+    name: Generate matrix from terragrunt DAG
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      layer_0: ${{ steps.split.outputs.layer_0 }}
+      layer_1: ${{ steps.split.outputs.layer_1 }}
+      layer_2: ${{ steps.split.outputs.layer_2 }}
+      layer_3: ${{ steps.split.outputs.layer_3 }}
+      layer_4: ${{ steps.split.outputs.layer_4 }}
+      layer_5: ${{ steps.split.outputs.layer_5 }}
+      layer_6: ${{ steps.split.outputs.layer_6 }}
+      layer_7: ${{ steps.split.outputs.layer_7 }}
+      layer_8: ${{ steps.split.outputs.layer_8 }}
+      layer_9: ${{ steps.split.outputs.layer_9 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # required for git diff against base ref
+          fetch-depth: 0
+      - name: Download binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: terragrunt-dag-bin
+      - name: Make binary executable
+        run: chmod +x ./terragrunt-dag
+      - name: Ensure yq is installed
+        run: |
+          # ubuntu-latest ships mikefarah's Go yq at /usr/bin/yq; install
+          # defensively in case the image changes. Must be Go yq, not Python yq.
+          if ! command -v yq >/dev/null 2>&1; then
+            sudo snap install yq
+          fi
+          yq --version
+      - id: split
+        name: Run terragrunt-dag --format gha and split by layer
+        run: |
+          # Count the number of fake-plan-layer-* jobs declared below and pass
+          # it to terragrunt-dag --max-layers. If the DAG ever produces more
+          # layers than we have job blocks, terragrunt-dag fails non-zero with
+          # a clear message - preferable to silently dropping units past the
+          # last layer-job. Add or remove fake-plan-layer-N blocks to adjust.
+          MAX_LAYERS=$(yq '[.jobs | keys[] | select(test("^fake-plan-layer-"))] | length' .github/workflows/example-gha-matrix.yml)
+          echo "max-layers cap derived from workflow file: $MAX_LAYERS"
+
+          MATRIX=$(./terragrunt-dag tests/fixtures/mixed_live_and_stack --format gha \
+              --base-ref origin/main --max-layers "$MAX_LAYERS" --gha-filter-unchanged)
+          echo "$MATRIX" | python3 -m json.tool
+
+          # Slice the matrix into one output per layer. Empty layers emit
+          # {"include": []} which downstream jobs skip via the `include[0]
+          # != null` guard.
+          for L in $(seq 0 9); do
+            SLICE=$(echo "$MATRIX" | jq -c --argjson L "$L" '{include: [.include[] | select(.layer == $L)]}')
+            echo "layer_$L=$SLICE" >> "$GITHUB_OUTPUT"
+          done
+
+  # ---------------------------------------------------------------------------
+  # Ideal pattern (NOT supported by GitHub Actions):
+  #
+  #   fake-plan:
+  #     needs: [plan-matrix, "${{ matrix.dependencies }}"]   # <-- impossible
+  #     strategy:
+  #       matrix: ${{ fromJSON(needs.plan-matrix.outputs.matrix) }}
+  #
+  # GitHub Actions resolves `needs:` at workflow-parse time, but `matrix.*`
+  # is only available per-job-instance after expansion. There is no way to
+  # express "this matrix entry waits on that other matrix entry" in pure GHA.
+  # (Forgejo Actions has the same limitation as of v14.0.)
+  #
+  # Workaround: emit one job per `layer` from terragrunt-dag and chain the
+  # jobs themselves via `needs:`. All entries in layer N run in parallel,
+  # but layer N+1 cannot start until layer N completes.
+  # ---------------------------------------------------------------------------
+  # Unchanged units are filtered out by terragrunt-dag itself via the
+  # `--gha-filter-unchanged` flag in `plan-matrix` above, so every matrix
+  # entry that reaches a layer job is expected to run. We can't gate at
+  # job-level via `if: matrix.changed` because GHA does NOT allow `matrix.*`
+  # in job-level `if:` (only in step-level `if:`, `runs-on:`, `with:`, etc.).
+  # Filtering upstream avoids spawning runners for skipped units entirely.
+  fake-plan-layer-0:
+    name: "Fake plan (layer 0) - ${{ matrix.name }}"
+    needs: plan-matrix
+    if: ${{ fromJSON(needs.plan-matrix.outputs.layer_0).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_0) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-1:
+    name: "Fake plan (layer 1) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-0]
+    if: ${{ always() && needs.fake-plan-layer-0.result != 'failure' && needs.fake-plan-layer-0.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_1).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_1) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-2:
+    name: "Fake plan (layer 2) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-1]
+    if: ${{ always() && needs.fake-plan-layer-1.result != 'failure' && needs.fake-plan-layer-1.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_2).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_2) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-3:
+    name: "Fake plan (layer 3) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-2]
+    if: ${{ always() && needs.fake-plan-layer-2.result != 'failure' && needs.fake-plan-layer-2.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_3).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_3) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-4:
+    name: "Fake plan (layer 4) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-3]
+    if: ${{ always() && needs.fake-plan-layer-3.result != 'failure' && needs.fake-plan-layer-3.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_4).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_4) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-5:
+    name: "Fake plan (layer 5) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-4]
+    if: ${{ always() && needs.fake-plan-layer-4.result != 'failure' && needs.fake-plan-layer-4.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_5).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_5) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-6:
+    name: "Fake plan (layer 6) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-5]
+    if: ${{ always() && needs.fake-plan-layer-5.result != 'failure' && needs.fake-plan-layer-5.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_6).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_6) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-7:
+    name: "Fake plan (layer 7) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-6]
+    if: ${{ always() && needs.fake-plan-layer-6.result != 'failure' && needs.fake-plan-layer-6.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_7).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_7) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-8:
+    name: "Fake plan (layer 8) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-7]
+    if: ${{ always() && needs.fake-plan-layer-7.result != 'failure' && needs.fake-plan-layer-7.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_8).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_8) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
+
+  fake-plan-layer-9:
+    name: "Fake plan (layer 9) - ${{ matrix.name }}"
+    needs: [plan-matrix, fake-plan-layer-8]
+    if: ${{ always() && needs.fake-plan-layer-8.result != 'failure' && needs.fake-plan-layer-8.result != 'cancelled' && fromJSON(needs.plan-matrix.outputs.layer_9).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-matrix.outputs.layer_9) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Fake terragrunt plan
+        working-directory: tests/fixtures/mixed_live_and_stack/${{ matrix.working-directory }}
+        run: |
+          echo "Would have run: terragrunt plan in $PWD"
+          echo "  unit:         ${{ matrix.name }}"
+          echo "  layer:        ${{ matrix.layer }}"
+          echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
