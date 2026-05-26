@@ -1,9 +1,11 @@
 //! JSON/YAML output serialization.
 
 use crate::Project;
+use crate::changes::unit_is_changed;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Compute execution order layers from project dependencies.
@@ -101,6 +103,7 @@ pub enum OutputFormat {
     Yaml,
     Atlantis,
     Digger,
+    Gha,
 }
 
 /// Configuration options for output generation
@@ -122,6 +125,17 @@ pub struct OutputConfig {
     pub automerge: bool,
     /// Enable parallel_apply in Atlantis output (default: false)
     pub parallel_apply: bool,
+    /// Set of changed files (absolute paths). `None` means "all units changed".
+    /// Only consulted by the `Gha` output format.
+    pub changed_files: Option<HashSet<PathBuf>>,
+    /// For `Gha` output: drop units where `changed == false`.
+    pub gha_filter_unchanged: bool,
+    /// When filtering unchanged units in `Gha` output, cascade to include
+    /// downstream dependents (BFS over the reverse dependency graph).
+    pub cascade_unchanged: bool,
+    /// Optional max layer count for --format gha. If Some(N), generate_gha errors
+    /// if the DAG has any unit with layer >= N (i.e., needs more than N buckets).
+    pub gha_max_layers: Option<u32>,
 }
 
 impl Default for OutputConfig {
@@ -135,6 +149,10 @@ impl Default for OutputConfig {
             autoplan_enabled: true,
             automerge: false,
             parallel_apply: false,
+            changed_files: None,
+            gha_filter_unchanged: false,
+            cascade_unchanged: true,
+            gha_max_layers: None,
         }
     }
 }
@@ -145,6 +163,13 @@ pub enum OutputError {
     JsonError(#[from] serde_json::Error),
     #[error("YAML serialization failed: {0}")]
     YamlError(#[from] serde_yaml::Error),
+    #[error(
+        "DAG has {found} layers but --max-layers is {max}; add more layer-jobs to your workflow or flatten the DAG"
+    )]
+    MaxLayersExceeded {
+        found: u32,
+        max: u32,
+    },
 }
 
 /// Convert a path to relative form if a base directory is provided
@@ -225,6 +250,23 @@ struct AtlantisAutoplan {
     enabled: bool,
 }
 
+/// GitHub Actions / Forgejo Actions matrix output.
+/// Consumed by `${{ fromJSON(...) }}` from a downstream `terragrunt` job.
+#[derive(Serialize)]
+struct GhaOutput {
+    include: Vec<GhaProject>,
+}
+
+#[derive(Serialize)]
+struct GhaProject {
+    name: String,
+    #[serde(rename = "working-directory")]
+    working_directory: String,
+    dependencies: Vec<String>,
+    layer: u32,
+    changed: bool,
+}
+
 /// Digger output format
 #[derive(Serialize)]
 struct DiggerOutput {
@@ -282,7 +324,7 @@ fn generate_yaml(projects: &[Project], config: &OutputConfig) -> Result<String, 
 
 /// Check if a path looks like a directory (no file extension).
 /// Used to detect terraform module source paths which need glob patterns.
-fn looks_like_directory(path: &camino::Utf8Path) -> bool {
+pub(crate) fn looks_like_directory(path: &camino::Utf8Path) -> bool {
     // Get the last component of the path
     if let Some(file_name) = path.file_name() {
         // If it has no extension or doesn't contain a dot, it's likely a directory
@@ -488,6 +530,90 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
     Ok(serde_yaml::to_string(&output)?)
 }
 
+/// Generate GitHub Actions / Forgejo Actions matrix output.
+///
+/// Output is a compact JSON object with a single `include` array; downstream
+/// jobs consume it via `${{ fromJSON(...) }}` as a matrix. Each entry carries
+/// the unit name, working directory, derived dependency names, DAG layer, and
+/// a `changed` flag computed from `config.changed_files`.
+fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
+    let layers = compute_layers(projects, config.base_dir.as_ref());
+
+    let mut entries: Vec<GhaProject> = projects
+        .iter()
+        .map(|p| {
+            let dir = make_relative(&p.dir, config.base_dir.as_deref());
+            let name = derive_name_from_dir(&dir);
+
+            let dependencies: Vec<String> = p
+                .project_dependencies
+                .iter()
+                .map(|dep_path| dependency_path_to_name(dep_path, config.base_dir.as_deref()))
+                .collect();
+
+            let layer = layers.get(&p.name).copied().unwrap_or(0);
+
+            let changed = match &config.changed_files {
+                Some(set) => unit_is_changed(p, set),
+                None => true,
+            };
+
+            GhaProject {
+                name,
+                working_directory: dir,
+                dependencies,
+                layer,
+                changed,
+            }
+        })
+        .collect();
+
+    if config.gha_filter_unchanged {
+        let mut keep: HashSet<String> = entries.iter().filter(|e| e.changed).map(|e| e.name.clone()).collect();
+
+        if config.cascade_unchanged {
+            // Build reverse adjacency: dep_name -> {dependent names}.
+            let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
+            for entry in &entries {
+                for dep in &entry.dependencies {
+                    reverse.entry(dep.clone()).or_default().push(entry.name.clone());
+                }
+            }
+
+            let mut queue: VecDeque<String> = keep.iter().cloned().collect();
+            while let Some(current) = queue.pop_front() {
+                if let Some(dependents) = reverse.get(&current) {
+                    for dependent in dependents {
+                        if keep.insert(dependent.clone()) {
+                            queue.push_back(dependent.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        entries.retain(|e| keep.contains(&e.name));
+    }
+
+    if let Some(max) = config.gha_max_layers {
+        // `needed` is the bucket count: max layer index + 1, or 0 if empty.
+        let needed = entries.iter().map(|e| e.layer).max().map(|m| m + 1).unwrap_or(0);
+        if needed > max {
+            return Err(OutputError::MaxLayersExceeded {
+                found: needed,
+                max,
+            });
+        }
+    }
+
+    let output = GhaOutput {
+        include: entries,
+    };
+
+    // Compact JSON: matrices live inside YAML strings, so avoid pretty-printing.
+    Ok(serde_json::to_string(&output)?)
+}
+
 /// Generate output in the specified format
 pub fn generate_output(
     projects: &[Project],
@@ -499,6 +625,7 @@ pub fn generate_output(
         OutputFormat::Yaml => generate_yaml(projects, config),
         OutputFormat::Atlantis => generate_atlantis(projects, config),
         OutputFormat::Digger => generate_digger(projects, config),
+        OutputFormat::Gha => generate_gha(projects, config),
     }
 }
 
@@ -1253,5 +1380,463 @@ mod tests {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
 
         assert_eq!(parsed["parallel_apply"], true);
+    }
+
+    // ============== GHA Output Tests ==============
+
+    /// Diamond DAG used by cascade tests: a -> b, a -> c, b/c -> d.
+    fn diamond_projects() -> Vec<Project> {
+        vec![
+            Project {
+                name: "a".to_string(),
+                dir: Utf8PathBuf::from("/repo/a"),
+                project_dependencies: vec![],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "b".to_string(),
+                dir: Utf8PathBuf::from("/repo/b"),
+                project_dependencies: vec!["/repo/a".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "c".to_string(),
+                dir: Utf8PathBuf::from("/repo/c"),
+                project_dependencies: vec!["/repo/a".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "d".to_string(),
+                dir: Utf8PathBuf::from("/repo/d"),
+                project_dependencies: vec!["/repo/b".to_string(), "/repo/c".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_gha_matrix_shape() {
+        let projects = sample_projects();
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let include = parsed["include"].as_array().expect("include must be an array");
+        assert_eq!(include.len(), 2);
+
+        for entry in include {
+            assert!(entry["name"].is_string());
+            assert!(entry["working-directory"].is_string());
+            assert!(entry["dependencies"].is_array());
+            assert!(entry["layer"].is_number());
+            assert!(entry["changed"].is_boolean());
+        }
+    }
+
+    #[test]
+    fn test_gha_working_directory_kebab_case() {
+        let projects = sample_projects();
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            ..Default::default()
+        };
+
+        let raw = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+
+        assert!(raw.contains("\"working-directory\""), "expected kebab-case field, got: {}", raw);
+        assert!(!raw.contains("\"working_directory\""), "snake_case field leaked: {}", raw);
+    }
+
+    #[test]
+    fn test_gha_dependencies_use_names() {
+        let projects = sample_projects();
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let app = parsed["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "live_prod_app")
+            .expect("live_prod_app must be present");
+
+        let deps: Vec<&str> = app["dependencies"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+
+        assert!(deps.contains(&"live_prod_vpc"), "deps={:?}", deps);
+        assert!(deps.contains(&"live_prod_rds"), "deps={:?}", deps);
+        // Confirm we are not emitting raw absolute paths.
+        for d in &deps {
+            assert!(!d.starts_with('/'), "dependency leaked as path: {}", d);
+        }
+    }
+
+    #[test]
+    fn test_gha_layer_matches_compute_layers() {
+        let projects = diamond_projects();
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            ..Default::default()
+        };
+
+        let expected = compute_layers(&projects, config.base_dir.as_ref());
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        for entry in parsed["include"].as_array().unwrap() {
+            let name = entry["name"].as_str().unwrap();
+            let internal = match name {
+                "a" => "a",
+                "b" => "b",
+                "c" => "c",
+                "d" => "d",
+                other => panic!("unexpected name: {other}"),
+            };
+            let layer = entry["layer"].as_u64().unwrap() as u32;
+            assert_eq!(layer, *expected.get(internal).unwrap(), "layer mismatch for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_gha_changed_all_true_when_no_diff() {
+        let projects = sample_projects();
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: None,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        for entry in parsed["include"].as_array().unwrap() {
+            assert_eq!(entry["changed"], true, "entry={:?}", entry);
+        }
+    }
+
+    #[test]
+    fn test_gha_changed_detected_inside_dir() {
+        let projects = sample_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/live/prod/vpc/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let vpc = parsed["include"].as_array().unwrap().iter().find(|e| e["name"] == "live_prod_vpc").unwrap();
+        let app = parsed["include"].as_array().unwrap().iter().find(|e| e["name"] == "live_prod_app").unwrap();
+
+        assert_eq!(vpc["changed"], true);
+        assert_eq!(app["changed"], false);
+    }
+
+    #[test]
+    fn test_gha_changed_detected_via_watch_file() {
+        let projects = sample_projects();
+        let mut changed = HashSet::new();
+        // sample_projects watch /repo/live/common/root.hcl on both units.
+        changed.insert(PathBuf::from("/repo/live/common/root.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        for entry in parsed["include"].as_array().unwrap() {
+            assert_eq!(entry["changed"], true, "entry={:?}", entry);
+        }
+    }
+
+    #[test]
+    fn test_gha_changed_detected_via_module_source_dir() {
+        // Watch entry without an extension ("/repo/modules/vpc") is treated as
+        // a directory; any change underneath counts as a hit.
+        let projects = vec![Project {
+            name: "prod_vpc".to_string(),
+            dir: Utf8PathBuf::from("/repo/live/prod/vpc"),
+            project_dependencies: vec![],
+            watch_files: vec![Utf8PathBuf::from("/repo/modules/vpc")],
+            has_terraform_source: true,
+        }];
+
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/modules/vpc/main.tf"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["include"][0]["changed"], true);
+    }
+
+    #[test]
+    fn test_gha_filter_unchanged_drops_unchanged() {
+        let projects = sample_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/live/prod/vpc/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            // No cascade: only the directly-changed unit should remain.
+            cascade_unchanged: false,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let names: Vec<&str> =
+            parsed["include"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
+
+        assert_eq!(names, vec!["live_prod_vpc"]);
+    }
+
+    #[test]
+    fn test_gha_filter_unchanged_with_cascade() {
+        // Diamond: change root `a` and cascade. Should include a, b, c, d.
+        let projects = diamond_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/a/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            cascade_unchanged: true,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let mut names: Vec<&str> =
+            parsed["include"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
+        names.sort();
+
+        assert_eq!(names, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_gha_changed_all_false_when_empty_diff() {
+        // `Some(empty)` must mean "git ran successfully but reported no changes":
+        // every unit must be `changed: false`. Distinct from `None` which means
+        // "no diff requested" and marks everything as changed.
+        let projects = sample_projects();
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(HashSet::new()),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        for entry in parsed["include"].as_array().unwrap() {
+            assert_eq!(entry["changed"], false, "entry={:?}", entry);
+        }
+    }
+
+    #[test]
+    fn test_gha_filter_unchanged_with_cycle_in_cascade_bfs() {
+        // a -> b -> a (cycle) with cascade on. BFS must terminate via
+        // `keep.insert` returning false for already-seen nodes.
+        let projects = vec![
+            Project {
+                name: "a".into(),
+                dir: Utf8PathBuf::from("/repo/a"),
+                project_dependencies: vec!["/repo/b".into()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "b".into(),
+                dir: Utf8PathBuf::from("/repo/b"),
+                project_dependencies: vec!["/repo/a".into()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+        ];
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/a/main.tf"));
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            cascade_unchanged: true,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let names: Vec<&str> =
+            parsed["include"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+
+        // a is the directly-changed unit; b cascades because b depends on a
+        // (reverse adjacency: a -> [b]). Then b's dependent is a, already in
+        // the keep set, so BFS terminates.
+        assert!(names.contains(&"a"), "expected `a` in matrix, got {:?}", names);
+        assert!(names.contains(&"b"), "expected `b` in matrix, got {:?}", names);
+    }
+
+    #[test]
+    fn test_gha_filter_unchanged_no_cascade() {
+        // Same diamond, but cascade off: only `a` remains.
+        let projects = diamond_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/a/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            cascade_unchanged: false,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let names: Vec<&str> =
+            parsed["include"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
+
+        assert_eq!(names, vec!["a"]);
+    }
+
+    #[test]
+    fn test_gha_max_layers_within_bound() {
+        // Two units, max layer index 1 (needed=2). max=5 -> succeed.
+        let projects = vec![
+            Project {
+                name: "a".into(),
+                dir: Utf8PathBuf::from("/repo/a"),
+                project_dependencies: vec![],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "b".into(),
+                dir: Utf8PathBuf::from("/repo/b"),
+                project_dependencies: vec!["/repo/a".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+        ];
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            gha_max_layers: Some(5),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).expect("should succeed within bound");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["include"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_gha_max_layers_exactly_at_bound() {
+        // Two units, max layer index 1 (needed=2). max=2 -> boundary, succeed.
+        let projects = vec![
+            Project {
+                name: "a".into(),
+                dir: Utf8PathBuf::from("/repo/a"),
+                project_dependencies: vec![],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "b".into(),
+                dir: Utf8PathBuf::from("/repo/b"),
+                project_dependencies: vec!["/repo/a".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+        ];
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            gha_max_layers: Some(2),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).expect("should succeed at bound");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(parsed["include"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_gha_max_layers_exceeded() {
+        // Chain a -> b -> c, max layer index 2 (needed=3). max=2 -> fail.
+        let projects = vec![
+            Project {
+                name: "a".into(),
+                dir: Utf8PathBuf::from("/repo/a"),
+                project_dependencies: vec![],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "b".into(),
+                dir: Utf8PathBuf::from("/repo/b"),
+                project_dependencies: vec!["/repo/a".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+            Project {
+                name: "c".into(),
+                dir: Utf8PathBuf::from("/repo/c"),
+                project_dependencies: vec!["/repo/b".to_string()],
+                watch_files: vec![],
+                has_terraform_source: true,
+            },
+        ];
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            gha_max_layers: Some(2),
+            ..Default::default()
+        };
+
+        let result = generate_output(&projects, OutputFormat::Gha, &config);
+
+        match result {
+            Err(OutputError::MaxLayersExceeded {
+                found,
+                max,
+            }) => {
+                assert_eq!(found, 3);
+                assert_eq!(max, 2);
+            }
+            other => panic!("expected MaxLayersExceeded {{ found: 3, max: 2 }}, got {:?}", other),
+        }
     }
 }

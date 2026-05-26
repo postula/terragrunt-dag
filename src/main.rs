@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::io;
 use std::process::ExitCode;
 
+use terragrunt_dag::changes;
 use terragrunt_dag::cycle::{DependencyEdge, EdgeType, analyze_cycles, detect_cycles, report_cycles};
 use terragrunt_dag::discovery::discover_files;
 use terragrunt_dag::output::{OutputConfig, OutputFormat, generate_output};
@@ -71,6 +72,23 @@ struct Cli {
     /// Exit with error if cycles are detected (default: false, only warn)
     #[arg(long, default_value_t = false, global = true)]
     strict: bool,
+
+    /// Base ref for change detection (e.g., "origin/main"). Runs
+    /// `git diff --name-only <ref>...HEAD`. Only used by --format gha.
+    /// If unset, all units are marked changed.
+    #[arg(long, global = true)]
+    base_ref: Option<String>,
+
+    /// For --format gha: emit only units with changed=true. Honors
+    /// --cascade-dependencies for downstream cascading.
+    #[arg(long, default_value_t = false, global = true)]
+    gha_filter_unchanged: bool,
+
+    /// For --format gha: maximum number of layer buckets the consuming workflow has hardcoded.
+    /// terragrunt-dag exits non-zero if the DAG produces more layers than this.
+    /// (A DAG with max layer index L requires L+1 buckets.)
+    #[arg(long, global = true)]
+    max_layers: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -85,6 +103,7 @@ enum Format {
     Yaml,
     Atlantis,
     Digger,
+    Gha,
 }
 
 impl From<Format> for OutputFormat {
@@ -94,6 +113,7 @@ impl From<Format> for OutputFormat {
             Format::Yaml => OutputFormat::Yaml,
             Format::Atlantis => OutputFormat::Atlantis,
             Format::Digger => OutputFormat::Digger,
+            Format::Gha => OutputFormat::Gha,
         }
     }
 }
@@ -231,10 +251,11 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let discovered = discover_and_process(&cli)?;
+    let format: OutputFormat = cli.format.clone().into();
 
     if discovered.projects.is_empty() {
-        let config = build_output_config(&cli, &discovered.root)?;
-        let output = generate_output(&[], cli.format.into(), &config)?;
+        let config = build_output_config(&cli, &discovered.root, format)?;
+        let output = generate_output(&[], format, &config)?;
         println!("{}", output);
         return Ok(());
     }
@@ -252,14 +273,60 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Generate output
-    let config = build_output_config(&cli, &discovered.root)?;
-    let output = generate_output(&discovered.projects, cli.format.into(), &config)?;
+    let config = build_output_config(&cli, &discovered.root, format)?;
+    let output = generate_output(&discovered.projects, format, &config)?;
     println!("{}", output);
 
     Ok(())
 }
 
-fn build_output_config(cli: &Cli, root: &Utf8PathBuf) -> Result<OutputConfig, Box<dyn std::error::Error>> {
+fn format_label(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Json => "json",
+        OutputFormat::Yaml => "yaml",
+        OutputFormat::Atlantis => "atlantis",
+        OutputFormat::Digger => "digger",
+        OutputFormat::Gha => "gha",
+    }
+}
+
+fn build_output_config(
+    cli: &Cli,
+    root: &Utf8PathBuf,
+    format: OutputFormat,
+) -> Result<OutputConfig, Box<dyn std::error::Error>> {
+    if format != OutputFormat::Gha {
+        let format_name = format_label(format);
+        if cli.base_ref.is_some() {
+            eprintln!("Warning: --base-ref is ignored for --format {} (only used by --format gha)", format_name);
+        }
+        if cli.gha_filter_unchanged {
+            eprintln!(
+                "Warning: --gha-filter-unchanged is ignored for --format {} (only used by --format gha)",
+                format_name
+            );
+        }
+        if cli.max_layers.is_some() {
+            eprintln!("Warning: --max-layers is ignored for --format {} (only used by --format gha)", format_name);
+        }
+    }
+
+    // Resolve the git diff only for --format gha when --base-ref is provided.
+    // On failure, warn and fall back to an empty set (i.e. nothing changed).
+    let changed_files = match (format, &cli.base_ref) {
+        (OutputFormat::Gha, Some(base_ref)) => {
+            let repo_root = std::path::Path::new(root.as_str());
+            match changes::diff_against(base_ref, repo_root) {
+                Ok(set) => Some(set),
+                Err(e) => {
+                    eprintln!("Warning: git diff failed, treating all units as unchanged: {}", e);
+                    Some(std::collections::HashSet::new())
+                }
+            }
+        }
+        _ => None,
+    };
+
     Ok(OutputConfig {
         base_dir: cli
             .base_dir
@@ -274,6 +341,10 @@ fn build_output_config(cli: &Cli, root: &Utf8PathBuf) -> Result<OutputConfig, Bo
         autoplan_enabled: cli.autoplan,
         automerge: cli.automerge,
         parallel_apply: cli.parallel_apply,
+        changed_files,
+        gha_filter_unchanged: cli.gha_filter_unchanged,
+        cascade_unchanged: cli.cascade_dependencies,
+        gha_max_layers: cli.max_layers,
     })
 }
 
