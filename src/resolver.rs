@@ -12,6 +12,9 @@ pub struct ResolveContext {
     /// The original project directory (for find_in_parent_folders)
     /// This is the directory where the main terragrunt.hcl is located
     pub project_dir: Utf8PathBuf,
+    /// Bound `values` from a parent `terragrunt.stack.hcl` for the current
+    /// expanded unit. `None` when this context is not evaluating a stack unit.
+    pub values: Option<hcl::Value>,
     /// Cached repo root (lazily computed)
     repo_root: OnceCell<Option<Utf8PathBuf>>,
 }
@@ -22,6 +25,7 @@ impl ResolveContext {
         Self {
             config_dir: project_dir.clone(),
             project_dir,
+            values: None,
             repo_root: OnceCell::new(),
         }
     }
@@ -32,8 +36,15 @@ impl ResolveContext {
         Self {
             config_dir,
             project_dir,
+            values: None,
             repo_root: OnceCell::new(),
         }
+    }
+
+    /// Attach bound `values` from a parent `terragrunt.stack.hcl` unit.
+    pub fn with_values(mut self, values: hcl::Value) -> Self {
+        self.values = Some(values);
+        self
     }
 
     /// Resolve a PathExpr to an actual filesystem path.
@@ -157,6 +168,17 @@ impl ResolveContext {
                 results
             }
 
+            PathExpr::ValuesRef(keys) => {
+                let Some(bound) = self.values.as_ref() else {
+                    return vec![];
+                };
+                let Some(literal) = lookup_values_string(bound, keys) else {
+                    return vec![];
+                };
+                // Reuse Literal resolution semantics: join with config_dir + normalize.
+                self.resolve_all(&PathExpr::Literal(literal))
+            }
+
             PathExpr::Unresolvable {
                 ..
             } => {
@@ -170,6 +192,24 @@ impl ResolveContext {
     /// Result is cached after first computation.
     pub fn repo_root(&self) -> Option<&Utf8PathBuf> {
         self.repo_root.get_or_init(|| find_repo_root(&self.project_dir)).as_ref()
+    }
+}
+
+/// Walk `bound` along `keys`, returning the terminal string value.
+///
+/// Returns `None` if any segment is missing, the traversal hits a non-object,
+/// or the terminal value is not a string.
+fn lookup_values_string(bound: &hcl::Value, keys: &[String]) -> Option<String> {
+    let mut cursor = bound;
+    for key in keys {
+        let hcl::Value::Object(obj) = cursor else {
+            return None;
+        };
+        cursor = obj.get(key.as_str())?;
+    }
+    match cursor {
+        hcl::Value::String(s) => Some(s.clone()),
+        _ => None,
     }
 }
 
@@ -653,6 +693,70 @@ mod tests {
         // Normalize to forward slashes for cross-platform comparison
         let normalized = normalize_slashes(&resolved);
         assert!(normalized.contains("/modules/"));
+    }
+
+    // ============== ValuesRef tests ==============
+
+    fn make_values_object(entries: &[(&str, hcl::Value)]) -> hcl::Value {
+        let mut map = hcl::Map::new();
+        for (k, v) in entries {
+            map.insert(k.to_string(), v.clone());
+        }
+        hcl::Value::Object(map)
+    }
+
+    #[test]
+    fn test_resolve_values_ref_top_level_string() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir)
+            .with_values(make_values_object(&[("dep", hcl::Value::String("../sg".to_string()))]));
+
+        let result = ctx.resolve(&PathExpr::ValuesRef(vec!["dep".to_string()]));
+
+        assert_eq!(result, Some(fixture_path("repo/live/prod/sg")));
+    }
+
+    #[test]
+    fn test_resolve_values_ref_nested_keys() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let inner = make_values_object(&[("dep", hcl::Value::String("../sg".to_string()))]);
+        let ctx = ResolveContext::new(project_dir).with_values(make_values_object(&[("svc", inner)]));
+
+        let result = ctx.resolve(&PathExpr::ValuesRef(vec!["svc".to_string(), "dep".to_string()]));
+
+        assert_eq!(result, Some(fixture_path("repo/live/prod/sg")));
+    }
+
+    #[test]
+    fn test_resolve_values_ref_missing_key_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir)
+            .with_values(make_values_object(&[("other", hcl::Value::String("x".to_string()))]));
+
+        let result = ctx.resolve(&PathExpr::ValuesRef(vec!["missing".to_string()]));
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_values_ref_non_string_terminal_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir)
+            .with_values(make_values_object(&[("n", hcl::Value::Number(hcl::Number::from(42)))]));
+
+        let result = ctx.resolve(&PathExpr::ValuesRef(vec!["n".to_string()]));
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_resolve_values_ref_without_bound_values_returns_none() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        let result = ctx.resolve(&PathExpr::ValuesRef(vec!["dep".to_string()]));
+
+        assert_eq!(result, None);
     }
 
     #[test]

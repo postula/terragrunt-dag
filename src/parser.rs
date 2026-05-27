@@ -44,6 +44,9 @@ pub enum PathExpr {
         true_branch: Box<PathExpr>,
         false_branch: Box<PathExpr>,
     },
+    /// Reference to a binding from a parent `terragrunt.stack.hcl` unit's `values = { ... }`.
+    /// Carries the attribute-traversal path, e.g. `values.foo.bar` → `["foo", "bar"]`.
+    ValuesRef(Vec<String>),
     /// Function we can't evaluate
     Unresolvable {
         func: String,
@@ -446,11 +449,46 @@ pub(crate) fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
             }
         }
 
+        hcl::Expression::Traversal(traversal) => extract_traversal_path(traversal),
+
         // For other expressions, mark as unresolvable
         _ => PathExpr::Unresolvable {
             func: format!("{:?}", expr),
         },
     }
+}
+
+/// Extract a `PathExpr` from a traversal expression.
+///
+/// Recognises `values.X.Y.Z` as `PathExpr::ValuesRef`. Other traversals
+/// (e.g. `local.foo`, `var.bar`) are left for the HCL evaluator and surface
+/// here as `Unresolvable`.
+fn extract_traversal_path(traversal: &hcl::expr::Traversal) -> PathExpr {
+    let hcl::Expression::Variable(root) = &traversal.expr else {
+        return PathExpr::Unresolvable {
+            func: format!("traversal root: {:?}", traversal.expr),
+        };
+    };
+
+    if root.as_str() != "values" {
+        return PathExpr::Unresolvable {
+            func: format!("traversal on {}", root.as_str()),
+        };
+    }
+
+    let mut keys = Vec::with_capacity(traversal.operators.len());
+    for op in &traversal.operators {
+        match op {
+            hcl::expr::TraversalOperator::GetAttr(ident) => keys.push(ident.as_str().to_string()),
+            _ => {
+                return PathExpr::Unresolvable {
+                    func: format!("non-attr traversal operator: {:?}", op),
+                };
+            }
+        }
+    }
+
+    PathExpr::ValuesRef(keys)
 }
 
 /// Extract a template expression into an Interpolation PathExpr.
@@ -1084,6 +1122,42 @@ mod tests {
             }
             _ => panic!("Expected Format, got {:?}", path_expr),
         }
+    }
+
+    // ============== values.* traversal tests ==============
+
+    #[test]
+    fn test_extract_path_expr_values_single_key() {
+        let hcl_str = r#"test = values.dep"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        assert_eq!(path_expr, PathExpr::ValuesRef(vec!["dep".to_string()]));
+    }
+
+    #[test]
+    fn test_extract_path_expr_values_nested_keys() {
+        let hcl_str = r#"test = values.foo.bar.baz"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        assert_eq!(path_expr, PathExpr::ValuesRef(vec!["foo".to_string(), "bar".to_string(), "baz".to_string()]));
+    }
+
+    #[test]
+    fn test_extract_path_expr_other_traversal_unresolvable() {
+        // `local.foo` is not a values reference and must not be misclassified.
+        let hcl_str = r#"test = local.foo"#;
+        let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
+        let attr = body.attributes().next().unwrap();
+
+        let path_expr = extract_path_expr(attr.expr());
+
+        assert!(matches!(path_expr, PathExpr::Unresolvable { .. }), "got {:?}", path_expr);
     }
 
     #[test]
