@@ -422,8 +422,8 @@ mod tests {
         let path = fixture_path("with_shared_module/live/staging/auth/terragrunt.stack.hcl");
         let parsed = parse_stack_file(&path).expect("should parse");
         assert_eq!(parsed.units.len(), 2);
-        assert!(parsed.units.iter().any(|u| u.path == "azure/bdo"));
-        assert!(parsed.units.iter().any(|u| u.path == "saml/crelan"));
+        assert!(parsed.units.iter().any(|u| u.path == "azure/alpha"));
+        assert!(parsed.units.iter().any(|u| u.path == "saml/beta"));
     }
 
     #[test]

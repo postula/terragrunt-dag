@@ -79,16 +79,16 @@ fn stack_with_generated_dir_does_not_duplicate() {
     );
 
     // Generated units are discovered AND synthesised — but should appear only once each.
-    let azure_count = parsed.projects.iter().filter(|p| p.dir.ends_with("/azure/bdo")).count();
-    let saml_count = parsed.projects.iter().filter(|p| p.dir.ends_with("/saml/crelan")).count();
+    let azure_count = parsed.projects.iter().filter(|p| p.dir.ends_with("/azure/alpha")).count();
+    let saml_count = parsed.projects.iter().filter(|p| p.dir.ends_with("/saml/beta")).count();
     assert_eq!(
         azure_count,
         1,
-        "azure/bdo emitted {} times, expected 1; dirs: {:?}",
+        "azure/alpha emitted {} times, expected 1; dirs: {:?}",
         azure_count,
         parsed.projects.iter().map(|p| &p.dir).collect::<Vec<_>>()
     );
-    assert_eq!(saml_count, 1, "saml/crelan emitted {} times, expected 1", saml_count);
+    assert_eq!(saml_count, 1, "saml/beta emitted {} times, expected 1", saml_count);
 
     // Each unit should watch the stack file.
     for unit in parsed.projects.iter().filter(|p| p.dir.contains(".terragrunt-stack")) {

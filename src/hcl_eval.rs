@@ -995,7 +995,7 @@ mod tests {
 
     #[test]
     fn for_body_with_try_falls_back_per_iteration() {
-        // Mirrors the fslabs `keycloak.organizations` pattern: each iteration
+        // Mirrors the example `keycloak.organizations` pattern: each iteration
         // calls try() on a possibly-missing field of the iterator variable.
         let customers = obj(&[
             ("alice", obj(&[("description", Value::String("alice desc".into()))])),
@@ -1003,7 +1003,7 @@ mod tests {
         ]);
         let locals = obj(&[("customers", customers)]);
         let out = eval(
-            r#"{ for name, c in local.customers : name => try(c.description, "FDK customer: ${name}") }"#,
+            r#"{ for name, c in local.customers : name => try(c.description, "ACME customer: ${name}") }"#,
             &Value::Object(hcl::Map::new()),
             &locals,
         )
@@ -1013,12 +1013,12 @@ mod tests {
             _ => panic!("expected object"),
         };
         assert_eq!(map.get("alice"), Some(&Value::String("alice desc".into())));
-        assert_eq!(map.get("bob"), Some(&Value::String("FDK customer: bob".into())));
+        assert_eq!(map.get("bob"), Some(&Value::String("ACME customer: bob".into())));
     }
 
     #[test]
     fn for_expression_in_merge_via_local() {
-        // Mirrors the fslabs `keycloak.groups` pattern: a for-object is the
+        // Mirrors the example `keycloak.groups` pattern: a for-object is the
         // second argument to merge(), and references local.customers.
         let body: hcl::Body = hcl::from_str(
             r#"
