@@ -6,6 +6,7 @@
 pub mod changes;
 pub mod cycle;
 pub mod discovery;
+pub mod hcl_eval;
 pub mod output;
 pub mod parser;
 pub mod processor;

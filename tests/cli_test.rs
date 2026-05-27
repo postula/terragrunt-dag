@@ -87,6 +87,32 @@ fn test_cli_verbose_output() {
 }
 
 #[test]
+fn test_cli_unresolvable_values_warns_without_strict() {
+    let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stack/values_unresolvable");
+
+    let output = cargo_bin().args(["--format", "json", fixture_dir]).output().expect("Failed to execute");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unresolvable") || stderr.contains("could not evaluate"),
+        "expected warning in stderr, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_cli_unresolvable_values_errors_with_strict() {
+    let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stack/values_unresolvable");
+
+    let output = cargo_bin().args(["--strict", "--format", "json", fixture_dir]).output().expect("Failed to execute");
+
+    assert!(!output.status.success(), "strict mode should fail when values are unresolvable");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Unresolvable"), "expected strict error in stderr, got: {}", stderr);
+}
+
+#[test]
 fn test_cli_empty_directory() {
     let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/parser/no_projects");
 

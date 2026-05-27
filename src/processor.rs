@@ -41,6 +41,20 @@ pub(crate) struct CachedConfig {
     pub has_terraform_block: bool,
 }
 
+/// Bound values for a synthetic stack unit.
+///
+/// Built lazily during stack expansion and consumed by the resolver when
+/// evaluating `values.X.Y` references inside the unit's templated config.
+#[derive(Debug, Clone)]
+pub struct StackBinding {
+    /// Fully evaluated `values = { ... }` object for this unit.
+    pub values: hcl::Value,
+    /// Source `terragrunt.stack.hcl` that produced this binding.
+    pub stack_file: Utf8PathBuf,
+    /// `unit.path` from the parent stack file.
+    pub parent_unit_path: String,
+}
+
 /// Cache for parsed terragrunt configs.
 ///
 /// Thread-safe for parallel processing with rayon.
@@ -48,6 +62,8 @@ pub(crate) struct CachedConfig {
 pub struct ParseCache {
     /// Map from canonicalized file path to parsed config
     cache: DashMap<Utf8PathBuf, CachedConfig>,
+    /// Bound values keyed by absolute expanded-unit directory.
+    pub stack_bindings: DashMap<Utf8PathBuf, StackBinding>,
 }
 
 impl ParseCache {
@@ -55,6 +71,7 @@ impl ParseCache {
     pub fn new() -> Self {
         Self {
             cache: DashMap::new(),
+            stack_bindings: DashMap::new(),
         }
     }
 
@@ -196,6 +213,27 @@ pub fn process_project_with_deps(
     cache: &ParseCache,
     cascade: bool,
 ) -> Result<Project, ProcessError> {
+    process_project_with_deps_inner(project_dir, cache, cascade, None)
+}
+
+/// Variant of [`process_project_with_deps`] that injects bound `values` from a
+/// parent `terragrunt.stack.hcl` unit so the resolver can substitute
+/// `values.X.Y` references.
+pub fn process_project_with_deps_with_values(
+    project_dir: &Utf8Path,
+    cache: &ParseCache,
+    cascade: bool,
+    values: hcl::Value,
+) -> Result<Project, ProcessError> {
+    process_project_with_deps_inner(project_dir, cache, cascade, Some(values))
+}
+
+fn process_project_with_deps_inner(
+    project_dir: &Utf8Path,
+    cache: &ParseCache,
+    cascade: bool,
+    values: Option<hcl::Value>,
+) -> Result<Project, ProcessError> {
     use std::collections::HashSet;
 
     let mut visited = HashSet::new();
@@ -214,6 +252,7 @@ pub fn process_project_with_deps(
         watch_files: &mut watch_files,
         has_terraform_source: &mut has_terraform_source,
         cascade,
+        values: values.as_ref(),
     };
     load_config_recursive(&terragrunt_file, &mut ctx)?;
 
@@ -242,6 +281,8 @@ struct LoadContext<'a> {
     watch_files: &'a mut Vec<Utf8PathBuf>,
     has_terraform_source: &'a mut bool,
     cascade: bool,
+    /// Bound `values` for the unit currently being processed.
+    values: Option<&'a hcl::Value>,
 }
 
 /// Recursively load a config file and collect its dependencies.
@@ -287,7 +328,10 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
     // - config_dir: the current file's directory (for relative path resolution)
     // - project_dir: the original project directory (for find_in_parent_folders)
     let config_dir = config_path.parent().unwrap_or(ctx.project_dir).to_path_buf();
-    let resolve_ctx = ResolveContext::for_included_config(config_dir.clone(), ctx.project_dir.to_path_buf());
+    let mut resolve_ctx = ResolveContext::for_included_config(config_dir.clone(), ctx.project_dir.to_path_buf());
+    if let Some(bound) = ctx.values {
+        resolve_ctx = resolve_ctx.with_values(bound.clone());
+    }
 
     // Process each dependency
     for dep in deps {
@@ -403,6 +447,9 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
                     watch_files: &mut dep_watch_files,
                     has_terraform_source: &mut dep_has_terraform,
                     cascade: false, // Don't cascade recursively - we handle it iteratively here
+                    // Bound `values` apply only to the synthetic unit itself, not
+                    // to its transitive dependencies.
+                    values: None,
                 };
                 load_config_recursive(&dep_hcl_path, &mut dep_ctx)?;
 

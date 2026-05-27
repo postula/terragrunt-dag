@@ -179,6 +179,20 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
         eprintln!("Expanded stacks into {} synthetic units", expanded.synthetic_projects.len());
     }
 
+    if expanded.unresolved_values_count > 0 {
+        eprintln!(
+            "Warning: {} stack unit(s) had unresolvable `values` expressions; dependency edges skipped",
+            expanded.unresolved_values_count
+        );
+        if cli.strict {
+            return Err(format!(
+                "Unresolvable stack `values` for {} unit(s) (use without --strict to continue)",
+                expanded.unresolved_values_count
+            )
+            .into());
+        }
+    }
+
     let filtered_paths = if let Some(ref pattern) = cli.filter {
         filter_projects(expanded.unit_dirs, pattern, &root)?
     } else {
