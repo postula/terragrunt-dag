@@ -7,5 +7,5 @@ terraform {
 }
 
 dependency "azure_auth" {
-  config_path = "../auth/.terragrunt-stack/azure/bdo"
+  config_path = "../auth/.terragrunt-stack/azure/alpha"
 }

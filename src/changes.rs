@@ -158,10 +158,10 @@ mod tests {
         // lives several levels below the toplevel.
         let toplevel = Path::new("/repo");
         let diff_line =
-            "tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/bdo/terragrunt.hcl";
+            "tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/alpha/terragrunt.hcl";
 
         let unit = project_with(
-            "/repo/tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/bdo",
+            "/repo/tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/alpha",
             vec![],
         );
         let mut changed = HashSet::new();
@@ -180,10 +180,10 @@ mod tests {
         // duplicates the `tests/fixtures/...` segment.
         let scan_root = Path::new("/repo/tests/fixtures/mixed_live_and_stack");
         let diff_line =
-            "tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/bdo/terragrunt.hcl";
+            "tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/alpha/terragrunt.hcl";
 
         let unit = project_with(
-            "/repo/tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/bdo",
+            "/repo/tests/fixtures/mixed_live_and_stack/live/staging/auth/.terragrunt-stack/azure/alpha",
             vec![],
         );
         let mut changed = HashSet::new();

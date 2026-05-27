@@ -1,19 +1,19 @@
-unit "azure__bdo" {
+unit "azure__alpha" {
   source = "../../../_modules/auth"
-  path   = "azure/bdo"
+  path   = "azure/alpha"
 
   values = {
     auth_type       = "azure"
-    connection_name = "bdo"
+    connection_name = "alpha"
   }
 }
 
-unit "saml__crelan" {
+unit "saml__beta" {
   source = "../../../_modules/auth"
-  path   = "saml/crelan"
+  path   = "saml/beta"
 
   values = {
     auth_type       = "saml"
-    connection_name = "crelan"
+    connection_name = "beta"
   }
 }
