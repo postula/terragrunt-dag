@@ -20,10 +20,6 @@
     features = ["derive"]
     version = "4.6.0"
 
-  [dependencies.dashmap]
-    features = ["rayon"]
-    version = "6.2.1"
-
   [dependencies.serde]
     features = ["derive"]
     version = "1.0.228"

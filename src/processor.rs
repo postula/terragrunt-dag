@@ -3,8 +3,10 @@
 //! This module provides simple, testable parallel processing of discovered
 //! terragrunt projects using rayon.
 
+use std::collections::HashMap;
+use std::sync::RwLock;
+
 use camino::{Utf8Path, Utf8PathBuf};
-use dashmap::DashMap;
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -61,17 +63,17 @@ pub struct StackBinding {
 /// Caches parsed configs to avoid re-parsing the same file.
 pub struct ParseCache {
     /// Map from canonicalized file path to parsed config
-    cache: DashMap<Utf8PathBuf, CachedConfig>,
+    cache: RwLock<HashMap<Utf8PathBuf, CachedConfig>>,
     /// Bound values keyed by absolute expanded-unit directory.
-    pub stack_bindings: DashMap<Utf8PathBuf, StackBinding>,
+    pub stack_bindings: RwLock<HashMap<Utf8PathBuf, StackBinding>>,
 }
 
 impl ParseCache {
     /// Create a new empty parse cache
     pub fn new() -> Self {
         Self {
-            cache: DashMap::new(),
-            stack_bindings: DashMap::new(),
+            cache: RwLock::new(HashMap::new()),
+            stack_bindings: RwLock::new(HashMap::new()),
         }
     }
 
@@ -84,8 +86,9 @@ impl ParseCache {
         // Normalize path for cache key
         let key = path.canonicalize_utf8().unwrap_or_else(|_| path.to_path_buf());
 
-        // Check cache first
-        if let Some(config) = self.cache.get(&key) {
+        // Check cache first; drop the read guard before parsing to avoid
+        // blocking other readers while we do filesystem work.
+        if let Some(config) = self.cache.read().expect("parse cache poisoned").get(&key) {
             return Ok(config.clone());
         }
 
@@ -95,7 +98,7 @@ impl ParseCache {
             deps: parsed.deps,
             has_terraform_block: parsed.has_terraform_block,
         };
-        self.cache.insert(key, cached.clone());
+        self.cache.write().expect("parse cache poisoned").insert(key, cached.clone());
         Ok(cached)
     }
 
@@ -111,8 +114,9 @@ impl ParseCache {
     ///
     /// Returns (entries, total_deps)
     pub fn stats(&self) -> (usize, usize) {
-        let entries = self.cache.len();
-        let total_deps: usize = self.cache.iter().map(|e| e.value().deps.len()).sum();
+        let guard = self.cache.read().expect("parse cache poisoned");
+        let entries = guard.len();
+        let total_deps: usize = guard.values().map(|c| c.deps.len()).sum();
         (entries, total_deps)
     }
 }
