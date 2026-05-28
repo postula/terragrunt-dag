@@ -93,7 +93,8 @@ jobs:
           BINARY_NAME="terragrunt-dag"
           if [ -f "${BINARY_NAME}" ]; then
             strip "${BINARY_NAME}" 2>/dev/null || true
-            tar czf "../../../terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz" "${BINARY_NAME}"
+            cp "${GITHUB_WORKSPACE}/LICENSE" "${GITHUB_WORKSPACE}/README.md" .
+            tar czf "../../../terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz" "${BINARY_NAME}" LICENSE README.md
             cd ../../..
             shasum -a 256 "terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz" > "terragrunt-dag-v${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256"
           fi
