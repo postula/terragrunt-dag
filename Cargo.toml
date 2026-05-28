@@ -8,7 +8,7 @@
   hcl-rs = "0.19.6"
   rayon = "1.11.0"
   serde_json = "1.0.149"
-  serde_yaml = "0.9.34+deprecated"
+  serde_yaml_ng = "0.10.0"
   thiserror = "2.0.18"
   walkdir = "2.5.0"
 

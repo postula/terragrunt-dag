@@ -91,8 +91,8 @@ impl Output {
         serde_json::to_string_pretty(self)
     }
 
-    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
-        serde_yaml::to_string(self)
+    pub fn to_yaml(&self) -> Result<String, serde_yaml_ng::Error> {
+        serde_yaml_ng::to_string(self)
     }
 }
 
@@ -162,7 +162,7 @@ pub enum OutputError {
     #[error("JSON serialization failed: {0}")]
     JsonError(#[from] serde_json::Error),
     #[error("YAML serialization failed: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(#[from] serde_yaml_ng::Error),
     #[error(
         "DAG has {found} layers but --max-layers is {max}; add more layer-jobs to your workflow or flatten the DAG"
     )]
@@ -319,7 +319,7 @@ fn generate_yaml(projects: &[Project], config: &OutputConfig) -> Result<String, 
     let output = GenericOutput {
         projects: projects.iter().map(|p| to_generic_project(p, config)).collect(),
     };
-    Ok(serde_yaml::to_string(&output)?)
+    Ok(serde_yaml_ng::to_string(&output)?)
 }
 
 /// Check if a path looks like a directory (no file extension).
@@ -461,7 +461,7 @@ fn generate_atlantis(projects: &[Project], config: &OutputConfig) -> Result<Stri
         projects: atlantis_projects,
     };
 
-    Ok(serde_yaml::to_string(&output)?)
+    Ok(serde_yaml_ng::to_string(&output)?)
 }
 
 /// Generate Digger YAML output
@@ -527,7 +527,7 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
         projects: digger_projects,
     };
 
-    Ok(serde_yaml::to_string(&output)?)
+    Ok(serde_yaml_ng::to_string(&output)?)
 }
 
 /// Generate GitHub Actions / Forgejo Actions matrix output.
@@ -700,7 +700,7 @@ mod tests {
 
         let output = generate_output(&projects, OutputFormat::Yaml, &config).expect("should generate YAML");
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).expect("should be valid YAML");
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).expect("should be valid YAML");
 
         assert!(parsed["projects"].is_sequence());
         // Without base_dir, name is derived from absolute path
@@ -721,7 +721,7 @@ mod tests {
         let output =
             generate_output(&projects, OutputFormat::Atlantis, &config).expect("should generate Atlantis YAML");
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["version"], 3);
         assert_eq!(parsed["parallel_plan"], true);
@@ -746,7 +746,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let when_modified = parsed["projects"][0]["autoplan"]["when_modified"].as_sequence().unwrap();
 
@@ -761,7 +761,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let depends_on = parsed["projects"][0]["depends_on"].as_sequence();
         assert!(depends_on.is_some());
@@ -784,7 +784,7 @@ mod tests {
 
         let output = generate_output(&projects, OutputFormat::Digger, &config).expect("should generate Digger YAML");
 
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert!(parsed["projects"].is_sequence());
 
@@ -802,7 +802,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let depends_on = parsed["projects"][0]["depends_on"].as_sequence();
         assert!(depends_on.is_some());
@@ -822,7 +822,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let include_patterns = parsed["projects"][0]["include_patterns"].as_sequence().unwrap();
 
@@ -850,7 +850,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let include_patterns = parsed["projects"][0]["include_patterns"].as_sequence().unwrap();
 
@@ -886,7 +886,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let depends_on = &parsed["projects"][0]["depends_on"];
         assert!(depends_on.is_null() || depends_on.as_sequence().map(|s| s.is_empty()).unwrap_or(true));
@@ -1050,7 +1050,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         // vpc should be group 0, app should be group 1
         // Without base_dir, names are derived from absolute paths
@@ -1082,7 +1082,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Digger, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         // Without base_dir, names are derived from absolute paths
         let vpc = parsed["projects"].as_sequence().unwrap().iter().find(|p| p["name"] == "_repo_vpc").unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         let when_modified = parsed["projects"][0]["autoplan"]["when_modified"].as_sequence().unwrap();
 
@@ -1203,7 +1203,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         // Check that names are derived from relative dirs, not from processor
         assert_eq!(parsed["projects"][0]["name"], "alarm_topic");
@@ -1229,7 +1229,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         // Workspace should match name when no override
         assert_eq!(parsed["projects"][0]["name"], "alarm_topic");
@@ -1262,7 +1262,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         // Both should use the override workspace
         assert_eq!(parsed["projects"][0]["workspace"], "production");
@@ -1286,7 +1286,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["projects"][0]["autoplan"]["enabled"], false);
     }
@@ -1303,7 +1303,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["projects"][0]["autoplan"]["enabled"], true);
     }
@@ -1320,7 +1320,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["automerge"], false);
     }
@@ -1340,7 +1340,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["automerge"], true);
     }
@@ -1357,7 +1357,7 @@ mod tests {
         let config = OutputConfig::default();
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["parallel_apply"], false);
     }
@@ -1377,7 +1377,7 @@ mod tests {
         };
 
         let output = generate_output(&projects, OutputFormat::Atlantis, &config).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&output).unwrap();
 
         assert_eq!(parsed["parallel_apply"], true);
     }
