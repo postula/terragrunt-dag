@@ -142,7 +142,7 @@ pub fn expand(unit_dirs: Vec<Utf8PathBuf>, stack_files: &[Utf8PathBuf], cache: &
             let bound_values = fold_frames(&collect_stack_frames(&unit_dir));
 
             if let Some(values) = bound_values.clone() {
-                cache.stack_bindings.insert(
+                cache.stack_bindings.write().expect("stack bindings poisoned").insert(
                     canonical_unit_dir,
                     StackBinding {
                         values,
@@ -462,7 +462,8 @@ mod tests {
         // Bound values should include the merged `env` key from locals as well.
         let unit_dir =
             fixture_path("values_merge_format/live/staging/svc/.terragrunt-stack/main").canonicalize_utf8().unwrap();
-        let binding = cache.stack_bindings.get(&unit_dir).expect("stack binding should be cached");
+        let bindings = cache.stack_bindings.read().expect("stack bindings poisoned");
+        let binding = bindings.get(&unit_dir).expect("stack binding should be cached");
         let hcl::Value::Object(values) = &binding.values else {
             panic!("expected object values, got {:?}", binding.values);
         };
@@ -631,7 +632,8 @@ mod tests {
         // The synthesized for-object should land in the cached binding.
         let unit_dir =
             fixture_path("values_for_expression/live/svc/.terragrunt-stack/svc").canonicalize_utf8().unwrap();
-        let binding = cache.stack_bindings.get(&unit_dir).expect("stack binding should be cached");
+        let bindings = cache.stack_bindings.read().expect("stack bindings poisoned");
+        let binding = bindings.get(&unit_dir).expect("stack binding should be cached");
         let hcl::Value::Object(values) = &binding.values else {
             panic!("expected object values, got {:?}", binding.values);
         };
@@ -664,6 +666,10 @@ mod tests {
         // Stack binding should be cached for the synthetic unit.
         let unit_dir =
             fixture_path("values_simple_dep/live/staging/svc/.terragrunt-stack/main").canonicalize_utf8().unwrap();
-        assert!(cache.stack_bindings.contains_key(&unit_dir), "stack binding should be cached for {}", unit_dir);
+        assert!(
+            cache.stack_bindings.read().expect("stack bindings poisoned").contains_key(&unit_dir),
+            "stack binding should be cached for {}",
+            unit_dir
+        );
     }
 }
