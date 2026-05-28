@@ -1,5 +1,7 @@
 # terragrunt-dag
 
+[![crates.io](https://img.shields.io/crates/v/terragrunt-dag.svg)](https://crates.io/crates/terragrunt-dag) [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE) [![CI](https://github.com/postula/terragrunt-dag/actions/workflows/ci.yml/badge.svg)](https://github.com/postula/terragrunt-dag/actions/workflows/ci.yml) [![docs.rs](https://docs.rs/terragrunt-dag/badge.svg)](https://docs.rs/terragrunt-dag) ![MSRV](https://img.shields.io/badge/rust-1.91.1%2B-blue.svg)
+
 Fast dependency graph generator for terragrunt monorepos. Outputs Atlantis, Digger, GitHub Actions matrix, JSON, or YAML.
 
 ## Install
