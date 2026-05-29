@@ -465,12 +465,12 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
                     }
                 }
 
-                // Also cascade watch files (avoiding duplicates)
-                for transitive_watch in dep_watch_files {
-                    if !ctx.watch_files.contains(&transitive_watch) {
-                        ctx.watch_files.push(transitive_watch);
-                    }
-                }
+                // NOTE: watch_files are intentionally NOT cascaded. A unit's
+                // watch_files describes only its own sources. Change-propagation
+                // across the DAG is handled in `crate::changes` via dep edges,
+                // not by inheriting a transitive watch list (which inflated lists
+                // with shared includes and over-flagged units as changed).
+                let _ = dep_watch_files;
             }
         }
     }
@@ -993,51 +993,49 @@ mod tests {
         );
     }
 
-    /// Test that watch files cascade from dependencies
+    /// Watch files are scoped to the unit's own sources — transitive
+    /// dependencies' watch_files are NOT inherited (change-propagation across
+    /// the DAG is handled in `crate::changes` via dependency edges).
     ///
     /// Structure:
     /// - A depends on B
     /// - B depends on C and reads config.yaml
     /// - C reads data.yaml
-    ///
-    /// With cascade=true:
-    /// - A should have watch_files from B and C (config.yaml, data.yaml)
     #[test]
-    fn test_cascade_watch_files() {
+    fn test_cascade_does_not_inherit_watch_files() {
         let cache = ParseCache::new();
         let fixture_root = processor_fixture_path("cascade/with_watch_files");
 
         let project_a_dir = fixture_root.join("a");
         let project_a = process_project_with_deps(&project_a_dir, &cache, true).expect("should process successfully");
 
-        // A should have dependencies: B, C
+        // A should have transitive dependencies B and C (cascade=true still
+        // flattens project_dependencies).
         assert_eq!(
             project_a.project_dependencies.len(),
             2,
-            "A should have 2 dependencies. Got: {:?}",
+            "A should have 2 transitive dependencies. Got: {:?}",
             project_a.project_dependencies
         );
 
-        // A should have watch files from B and C
+        // A must NOT inherit watch files from B or C.
         assert!(
-            project_a.watch_files.iter().any(|f| f.ends_with("config.yaml")),
-            "A should have config.yaml from B's watch files. Got: {:?}",
+            !project_a.watch_files.iter().any(|f| f.ends_with("config.yaml")),
+            "A must not inherit config.yaml from B. Got: {:?}",
             project_a.watch_files
         );
 
         assert!(
-            project_a.watch_files.iter().any(|f| f.ends_with("data.yaml")),
-            "A should have data.yaml from C's watch files. Got: {:?}",
+            !project_a.watch_files.iter().any(|f| f.ends_with("data.yaml")),
+            "A must not inherit data.yaml from C. Got: {:?}",
             project_a.watch_files
         );
 
-        // Test with cascade=false - should NOT include transitive watch files
+        // cascade=false must also keep watch_files lean.
         let cache_no_cascade = ParseCache::new();
         let project_a_no_cascade =
             process_project_with_deps(&project_a_dir, &cache_no_cascade, false).expect("should process successfully");
 
-        // With cascade=false, A should only have its own watch files (none in this case)
-        // and NOT the watch files from B and C
         assert!(
             !project_a_no_cascade.watch_files.iter().any(|f| f.ends_with("config.yaml")),
             "A should NOT have config.yaml from B with cascade=false. Got: {:?}",

@@ -108,6 +108,8 @@ jobs:
 
 `dependencies` and `layer` let callers chain layered jobs via `needs:` instead of per-step `if:` filtering. `--base-ref` requires `git` on PATH (standard in CI); on git failure it warns to stderr and marks all units unchanged. Use `--max-layers <N>` to fail-fast when the DAG exceeds the number of layer-jobs your workflow has hardcoded.
 
+A unit is marked changed if any of its own source files changed, and (with `--cascade-dependencies`, the default) the change is propagated to its downstream dependents through the DAG.
+
 ## Performance
 
 Target: <500ms for 800 projects. Uses rayon for parallel processing and caches parsed configs.

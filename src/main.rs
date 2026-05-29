@@ -64,8 +64,11 @@ struct Cli {
     #[arg(long, default_value_t = false, global = true)]
     parallel_apply: bool,
 
-    /// When true, dependencies cascade to include all transitive dependencies.
-    /// Use --no-cascade-dependencies to disable (default: true)
+    /// When true, dependencies cascade transitively: each unit's
+    /// `project_dependencies` is flattened to include indirect deps, and for
+    /// `--format gha` a change to any unit also flags its (transitive)
+    /// dependents as changed. Use --no-cascade-dependencies to disable
+    /// (default: true).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, global = true)]
     cascade_dependencies: bool,
 
