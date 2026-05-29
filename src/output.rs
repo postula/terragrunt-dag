@@ -1,7 +1,7 @@
 //! JSON/YAML output serialization.
 
 use crate::Project;
-use crate::changes::unit_is_changed;
+use crate::changes::compute_changed_units;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -539,6 +539,14 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
 fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
     let layers = compute_layers(projects, config.base_dir.as_ref());
 
+    // Compute changed set once. When `cascade_unchanged` is set, dependents of
+    // changed units are pulled in via DAG-edge propagation; otherwise only the
+    // directly-changed seed set is returned.
+    let changed_units: Option<HashSet<String>> = config
+        .changed_files
+        .as_ref()
+        .map(|set| compute_changed_units(projects, set, config.cascade_unchanged));
+
     let mut entries: Vec<GhaProject> = projects
         .iter()
         .map(|p| {
@@ -553,8 +561,8 @@ fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, O
 
             let layer = layers.get(&p.name).copied().unwrap_or(0);
 
-            let changed = match &config.changed_files {
-                Some(set) => unit_is_changed(p, set),
+            let changed = match &changed_units {
+                Some(set) => set.contains(p.dir.as_str()),
                 None => true,
             };
 
@@ -1546,7 +1554,8 @@ mod tests {
         let app = parsed["include"].as_array().unwrap().iter().find(|e| e["name"] == "live_prod_app").unwrap();
 
         assert_eq!(vpc["changed"], true);
-        assert_eq!(app["changed"], false);
+        // app depends on vpc; change in vpc propagates to app via the DAG.
+        assert_eq!(app["changed"], true);
     }
 
     #[test]
@@ -1601,13 +1610,14 @@ mod tests {
     fn test_gha_filter_unchanged_drops_unchanged() {
         let projects = sample_projects();
         let mut changed = HashSet::new();
-        changed.insert(PathBuf::from("/repo/live/prod/vpc/terragrunt.hcl"));
+        // `app` is a DAG sink in sample_projects: nothing depends on it, so a
+        // change inside `app/` flags only `app` and the other unit is dropped.
+        changed.insert(PathBuf::from("/repo/live/prod/app/terragrunt.hcl"));
 
         let config = OutputConfig {
             base_dir: Some(Utf8PathBuf::from("/repo")),
             changed_files: Some(changed),
             gha_filter_unchanged: true,
-            // No cascade: only the directly-changed unit should remain.
             cascade_unchanged: false,
             ..Default::default()
         };
@@ -1618,7 +1628,7 @@ mod tests {
         let names: Vec<&str> =
             parsed["include"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
 
-        assert_eq!(names, vec!["live_prod_vpc"]);
+        assert_eq!(names, vec!["live_prod_app"]);
     }
 
     #[test]
