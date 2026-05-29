@@ -542,10 +542,8 @@ fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, O
     // Compute changed set once. When `cascade_unchanged` is set, dependents of
     // changed units are pulled in via DAG-edge propagation; otherwise only the
     // directly-changed seed set is returned.
-    let changed_units: Option<HashSet<String>> = config
-        .changed_files
-        .as_ref()
-        .map(|set| compute_changed_units(projects, set, config.cascade_unchanged));
+    let changed_units: Option<HashSet<String>> =
+        config.changed_files.as_ref().map(|set| compute_changed_units(projects, set, config.cascade_unchanged));
 
     let mut entries: Vec<GhaProject> = projects
         .iter()

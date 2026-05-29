@@ -84,11 +84,7 @@ fn git_toplevel(repo_root: &Path) -> std::io::Result<PathBuf> {
 /// of `project_dependencies` must use the same canonical form (they are
 /// populated as absolute paths in `crate::processor`). A mismatch would
 /// silently drop propagation, hence the debug assertion below.
-pub fn compute_changed_units(
-    projects: &[Project],
-    changed: &HashSet<PathBuf>,
-    cascade: bool,
-) -> HashSet<String> {
+pub fn compute_changed_units(projects: &[Project], changed: &HashSet<PathBuf>, cascade: bool) -> HashSet<String> {
     // Catch silent identity drift between `Project.dir` keys and the strings
     // stored in `project_dependencies`. Both must be absolute paths.
     debug_assert!(
@@ -270,10 +266,8 @@ mod tests {
     /// changed path.
     #[test]
     fn test_compute_changed_units_propagates_via_deps() {
-        let projects = vec![
-            project("/repo/live/b", vec![], vec![]),
-            project("/repo/live/a", vec![], vec!["/repo/live/b"]),
-        ];
+        let projects =
+            vec![project("/repo/live/b", vec![], vec![]), project("/repo/live/a", vec![], vec!["/repo/live/b"])];
 
         let mut changed = HashSet::new();
         // Change a file inside B's dir.
