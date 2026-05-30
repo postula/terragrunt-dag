@@ -7,12 +7,119 @@
 //! conservative: anything we cannot evaluate raises an error so the caller
 //! can warn-and-skip.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use camino::Utf8PathBuf;
 use hcl::Value;
 use hcl::eval::{Context, Evaluate, FuncDef, ParamType};
 
+use crate::resolver::{FileIoSeen, ResolveContext};
+use crate::stack::EvalReport;
+
+/// Per-thread ambient state consulted by the registered HCL `fn` stubs.
+///
+/// `hcl-rs` requires bare `fn` pointers for `FuncDef`, so we cannot capture
+/// `ResolveContext` data in closures. Instead the caller stages the relevant
+/// state here for the lifetime of a single `evaluate_expression` call via
+/// [`with_ambient`].
+#[derive(Default)]
+struct AmbientState {
+    repo_root: Option<String>,
+    config_dir: Option<String>,
+    parent_dir: Option<String>,
+    strict: bool,
+    eval_report: Option<Rc<RefCell<EvalReport>>>,
+    file_io_seen: Option<FileIoSeen>,
+    stack_file: Option<Utf8PathBuf>,
+}
+
+thread_local! {
+    static AMBIENT: RefCell<AmbientState> = RefCell::new(AmbientState::default());
+}
+
+/// Snapshot the current ambient state, install `state`, run `f`, then
+/// restore. Re-entrant safe: nested calls see the inner state and the outer
+/// state is restored on exit.
+fn with_ambient<R, F: FnOnce() -> R>(state: AmbientState, f: F) -> R {
+    let previous = AMBIENT.with(|cell| cell.replace(state));
+    let result = f();
+    AMBIENT.with(|cell| {
+        *cell.borrow_mut() = previous;
+    });
+    result
+}
+
+fn snapshot_from(resolve_ctx: &ResolveContext) -> AmbientState {
+    AmbientState {
+        repo_root: resolve_ctx.repo_root().map(|p| p.to_string()),
+        config_dir: Some(resolve_ctx.config_dir.to_string()),
+        parent_dir: resolve_ctx.parent_dir.as_ref().map(|p| p.to_string()),
+        strict: resolve_ctx.options.strict,
+        eval_report: resolve_ctx.eval_report.clone(),
+        file_io_seen: resolve_ctx.file_io_seen.clone(),
+        stack_file: resolve_ctx.stack_file.clone(),
+    }
+}
+
+/// Record a file-IO stub call against `func_name`, deduping against the
+/// shared `(function, stack file)` set so repeated calls inside one stack
+/// expansion only bump `file_io_failures` once.
+fn record_file_io_failure(func_name: &str) {
+    AMBIENT.with(|cell| {
+        let ambient = cell.borrow();
+        if let Some(seen) = ambient.file_io_seen.as_ref() {
+            let key = (
+                func_name.to_string(),
+                ambient.stack_file.clone().unwrap_or_else(|| Utf8PathBuf::from("")),
+            );
+            if !seen.borrow_mut().insert(key) {
+                return;
+            }
+        }
+        if let Some(report) = ambient.eval_report.as_ref() {
+            report.borrow_mut().file_io_failures += 1;
+        }
+    });
+}
+
+fn ambient_is_strict() -> bool {
+    AMBIENT.with(|cell| cell.borrow().strict)
+}
+
+fn ambient_repo_root() -> String {
+    AMBIENT.with(|cell| cell.borrow().repo_root.clone().unwrap_or_default())
+}
+
+fn ambient_config_dir() -> String {
+    AMBIENT.with(|cell| cell.borrow().config_dir.clone().unwrap_or_default())
+}
+
+fn ambient_parent_dir() -> String {
+    AMBIENT.with(|cell| cell.borrow().parent_dir.clone().unwrap_or_default())
+}
+
 /// Build an evaluation context with `values` and `local` declared and our
 /// helper functions registered.
-pub fn build_context(values: &Value, locals: &Value) -> Context<'static> {
+///
+/// `resolve_ctx` supplies the directory information consulted by the
+/// terragrunt builtins (`get_repo_root`, `get_terragrunt_dir`, etc.) and the
+/// shared eval-report used by the file-IO stubs.
+pub fn build_context<'a>(values: &Value, locals: &Value, _resolve_ctx: &ResolveContext) -> Context<'a> {
+    let mut ctx = Context::new();
+    ctx.declare_var("values", values.clone());
+    ctx.declare_var("local", locals.clone());
+    register_helpers(&mut ctx);
+    register_terragrunt_stubs(&mut ctx);
+    ctx
+}
+
+/// Build a context that does not consult any resolver state.
+///
+/// Used for tests and internal callers that do not have a meaningful
+/// `ResolveContext` (e.g. evaluating `try()` fallbacks during expression
+/// rewrite).
+pub fn build_context_unbound<'a>(values: &Value, locals: &Value) -> Context<'a> {
     let mut ctx = Context::new();
     ctx.declare_var("values", values.clone());
     ctx.declare_var("local", locals.clone());
@@ -54,27 +161,40 @@ fn register_helpers(ctx: &mut Context<'_>) {
 
 fn register_terragrunt_stubs(ctx: &mut Context<'_>) {
     // These stubs let stack files reference common terragrunt builtins
-    // without aborting evaluation. Path resolution itself is handled by
-    // `ResolveContext`; here we only need to return *something* sensible.
-    ctx.declare_func("get_repo_root", FuncDef::builder().build(empty_string_func));
-    ctx.declare_func("get_terragrunt_dir", FuncDef::builder().build(empty_string_func));
+    // without aborting evaluation. They consult thread-local ambient state
+    // staged by `with_ambient` so each evaluation sees the active
+    // resolver's directories.
+    ctx.declare_func("get_repo_root", FuncDef::builder().build(get_repo_root_func));
+    ctx.declare_func("get_terragrunt_dir", FuncDef::builder().build(get_terragrunt_dir_func));
+    ctx.declare_func("get_parent_terragrunt_dir", FuncDef::builder().build(get_parent_terragrunt_dir_func));
     ctx.declare_func(
         "find_in_parent_folders",
-        FuncDef::builder().variadic_param(ParamType::String).build(empty_string_func),
+        FuncDef::builder().variadic_param(ParamType::String).build(find_in_parent_folders_stub),
     );
     ctx.declare_func(
         "get_env",
         FuncDef::builder().param(ParamType::String).variadic_param(ParamType::Any).build(get_env_func),
     );
+    ctx.declare_func("run_cmd", FuncDef::builder().variadic_param(ParamType::Any).build(run_cmd_stub));
 
     // Common HCL/Terraform builtins that frequently appear in real-world
     // stack files. They are not semantically modelled here; we only need
     // their evaluation to succeed so the surrounding expression can return.
     ctx.declare_func("jsonencode", FuncDef::builder().param(ParamType::Any).build(stub_string_func));
     ctx.declare_func("yamlencode", FuncDef::builder().param(ParamType::Any).build(stub_string_func));
-    ctx.declare_func("jsondecode", FuncDef::builder().param(ParamType::String).build(stub_object_func));
-    ctx.declare_func("yamldecode", FuncDef::builder().param(ParamType::String).build(stub_object_func));
-    ctx.declare_func("file", FuncDef::builder().param(ParamType::String).build(stub_string_func));
+    ctx.declare_func("jsondecode", FuncDef::builder().param(ParamType::String).build(jsondecode_stub));
+    ctx.declare_func("yamldecode", FuncDef::builder().param(ParamType::String).build(yamldecode_stub));
+    ctx.declare_func("file", FuncDef::builder().param(ParamType::String).build(file_stub));
+    ctx.declare_func("read_terragrunt_config", FuncDef::builder().param(ParamType::Any).build(read_terragrunt_config_stub));
+    ctx.declare_func(
+        "templatefile",
+        FuncDef::builder()
+            .param(ParamType::String)
+            .param(ParamType::Object(Box::new(ParamType::Any)))
+            .build(templatefile_stub),
+    );
+    ctx.declare_func("read_tfvars_file", FuncDef::builder().param(ParamType::String).build(read_tfvars_file_stub));
+    ctx.declare_func("sops_decrypt_file", FuncDef::builder().param(ParamType::String).build(sops_decrypt_file_stub));
     ctx.declare_func("fileexists", FuncDef::builder().param(ParamType::String).build(false_func));
     ctx.declare_func("trimspace", FuncDef::builder().param(ParamType::String).build(trimspace_func));
     ctx.declare_func("lower", FuncDef::builder().param(ParamType::String).build(lower_func));
@@ -124,8 +244,74 @@ fn stub_string_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
     Ok(Value::String(String::new()))
 }
 
-fn stub_object_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
-    Ok(Value::Object(hcl::Map::new()))
+/// Shared body for string-returning file-IO stubs. Records the call under
+/// `func_name` (deduped against the ambient `file_io_seen` set) and either
+/// errors (strict) or returns an empty string (lenient).
+fn file_io_stub_string_impl(func_name: &str) -> Result<Value, String> {
+    record_file_io_failure(func_name);
+    if ambient_is_strict() {
+        Err("file I/O is not supported by this evaluator".to_string())
+    } else {
+        Ok(Value::String(String::new()))
+    }
+}
+
+/// Shared body for object-returning file-IO stubs.
+fn file_io_stub_object_impl(func_name: &str) -> Result<Value, String> {
+    record_file_io_failure(func_name);
+    if ambient_is_strict() {
+        Err("file I/O is not supported by this evaluator".to_string())
+    } else {
+        Ok(Value::Object(hcl::Map::new()))
+    }
+}
+
+fn file_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_string_impl("file")
+}
+
+fn find_in_parent_folders_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_string_impl("find_in_parent_folders")
+}
+
+fn run_cmd_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_string_impl("run_cmd")
+}
+
+fn templatefile_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_string_impl("templatefile")
+}
+
+fn sops_decrypt_file_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_string_impl("sops_decrypt_file")
+}
+
+fn jsondecode_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_object_impl("jsondecode")
+}
+
+fn yamldecode_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_object_impl("yamldecode")
+}
+
+fn read_terragrunt_config_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_object_impl("read_terragrunt_config")
+}
+
+fn read_tfvars_file_stub(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    file_io_stub_object_impl("read_tfvars_file")
+}
+
+fn get_repo_root_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    Ok(Value::String(ambient_repo_root()))
+}
+
+fn get_terragrunt_dir_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    Ok(Value::String(ambient_config_dir()))
+}
+
+fn get_parent_terragrunt_dir_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
+    Ok(Value::String(ambient_parent_dir()))
 }
 
 fn false_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
@@ -358,10 +544,6 @@ fn lookup_func(args: hcl::eval::FuncArgs) -> Result<Value, String> {
     Ok(obj.get(&key).cloned().unwrap_or(default))
 }
 
-fn empty_string_func(_args: hcl::eval::FuncArgs) -> Result<Value, String> {
-    Ok(Value::String(String::new()))
-}
-
 fn get_env_func(args: hcl::eval::FuncArgs) -> Result<Value, String> {
     let mut iter = args.into_values().into_iter();
     let name = match iter.next() {
@@ -394,6 +576,17 @@ fn value_to_display_string(value: &Value) -> String {
 /// because `values.missing` failed to evaluate.
 pub fn evaluate_expression(expr: &hcl::Expression, ctx: &Context<'_>) -> Result<Value, String> {
     eval_lazy(expr, ctx, &[])
+}
+
+/// Variant of [`evaluate_expression`] that stages `resolve_ctx` as the
+/// ambient state consulted by terragrunt builtins and file-IO stubs.
+pub fn evaluate_expression_with_ctx(
+    expr: &hcl::Expression,
+    ctx: &Context<'_>,
+    resolve_ctx: &ResolveContext,
+) -> Result<Value, String> {
+    let snapshot = snapshot_from(resolve_ctx);
+    with_ambient(snapshot, || eval_lazy(expr, ctx, &[]))
 }
 
 /// Iterator-variable bindings active during a single `for`-expression
@@ -468,7 +661,7 @@ fn eval_lazy(expr: &hcl::Expression, ctx: &Context<'_>, iter_bindings: &IterBind
 fn clone_context(ctx: &Context<'_>) -> Context<'static> {
     let values = lookup_bare(ctx, "values").unwrap_or_else(|| Value::Object(hcl::Map::new()));
     let locals = lookup_bare(ctx, "local").unwrap_or_else(|| Value::Object(hcl::Map::new()));
-    build_context(&values, &locals)
+    build_context_unbound(&values, &locals)
 }
 
 /// Resolve a bare variable in `ctx` by going through the expression
@@ -685,7 +878,7 @@ fn rewrite_try(
 /// Returns a `Value::Object` keyed by local name. Locals that never
 /// resolve are silently dropped — callers depending on them surface
 /// downstream errors.
-pub fn evaluate_locals(body: &hcl::Body, values: &Value) -> Result<Value, String> {
+pub fn evaluate_locals(body: &hcl::Body, values: &Value, resolve_ctx: &ResolveContext) -> Result<Value, String> {
     let mut pending: Vec<(String, &hcl::Expression)> = Vec::new();
     for block in body.blocks() {
         if block.identifier() != "locals" {
@@ -702,8 +895,8 @@ pub fn evaluate_locals(body: &hcl::Body, values: &Value) -> Result<Value, String
         let mut remaining = Vec::with_capacity(pending.len());
         for (key, expr) in pending.drain(..) {
             let snapshot = Value::Object(locals_obj.clone());
-            let ctx = build_context(values, &snapshot);
-            match evaluate_expression(expr, &ctx) {
+            let ctx = build_context(values, &snapshot, resolve_ctx);
+            match evaluate_expression_with_ctx(expr, &ctx, resolve_ctx) {
                 Ok(value) => {
                     locals_obj.insert(key, value);
                     progressed = true;
@@ -734,8 +927,12 @@ mod tests {
 
     fn eval(src: &str, values: &Value, locals: &Value) -> Result<Value, String> {
         let expr: hcl::Expression = src.parse().map_err(|e: hcl::Error| e.to_string())?;
-        let ctx = build_context(values, locals);
+        let ctx = build_context_unbound(values, locals);
         evaluate_expression(&expr, &ctx)
+    }
+
+    fn dummy_resolve_ctx() -> ResolveContext {
+        ResolveContext::new(camino::Utf8PathBuf::from("/tmp"))
     }
 
     #[test]
@@ -884,7 +1081,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let locals = evaluate_locals(&body, &Value::Object(hcl::Map::new())).unwrap();
+        let locals = evaluate_locals(&body, &Value::Object(hcl::Map::new()), &dummy_resolve_ctx()).unwrap();
         let map = match locals {
             Value::Object(m) => m,
             _ => panic!("expected object"),
@@ -1029,7 +1226,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        let locals = evaluate_locals(&body, &Value::Object(hcl::Map::new())).unwrap();
+        let locals = evaluate_locals(&body, &Value::Object(hcl::Map::new()), &dummy_resolve_ctx()).unwrap();
         let map = match locals {
             Value::Object(m) => m,
             _ => panic!("expected object"),
@@ -1043,6 +1240,98 @@ mod tests {
         assert_eq!(groups.get("p/bob"), Some(&Value::String("bob".into())));
     }
 
+    fn resolve_ctx_with_repo_root(repo_root: &str) -> ResolveContext {
+        // Build a ResolveContext whose repo root is `repo_root`. We achieve
+        // this by seeding the path with a `.git` marker so the lazy
+        // `find_repo_root` walk lands on the temp dir.
+        std::fs::create_dir_all(format!("{}/.git", repo_root)).unwrap();
+        ResolveContext::new(camino::Utf8PathBuf::from(repo_root))
+    }
+
+    #[test]
+    fn get_repo_root_in_values_expr_uses_resolve_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_root = dir.path().to_str().unwrap();
+        let resolve_ctx = resolve_ctx_with_repo_root(repo_root);
+
+        let values = Value::Object(hcl::Map::new());
+        let locals = Value::Object(hcl::Map::new());
+        let expr: hcl::Expression = "get_repo_root()".parse().unwrap();
+        let ctx = build_context(&values, &locals, &resolve_ctx);
+
+        let out = evaluate_expression_with_ctx(&expr, &ctx, &resolve_ctx).unwrap();
+        assert_eq!(out, Value::String(repo_root.to_string()));
+    }
+
+    #[test]
+    fn get_terragrunt_dir_in_values_expr_returns_config_dir() {
+        let resolve_ctx = ResolveContext::new(camino::Utf8PathBuf::from("/some/config/dir"));
+        let values = Value::Object(hcl::Map::new());
+        let locals = Value::Object(hcl::Map::new());
+        let expr: hcl::Expression = "get_terragrunt_dir()".parse().unwrap();
+        let ctx = build_context(&values, &locals, &resolve_ctx);
+
+        let out = evaluate_expression_with_ctx(&expr, &ctx, &resolve_ctx).unwrap();
+        assert_eq!(out, Value::String("/some/config/dir".to_string()));
+    }
+
+    #[test]
+    fn file_call_records_failure_under_strict() {
+        let report = Rc::new(RefCell::new(EvalReport::default()));
+        let resolve_ctx = ResolveContext::new(camino::Utf8PathBuf::from("/tmp"))
+            .with_options(crate::resolver::ResolveOptions {
+                strict: true,
+                ..Default::default()
+            })
+            .with_eval_report(Rc::clone(&report));
+
+        let values = Value::Object(hcl::Map::new());
+        let locals = Value::Object(hcl::Map::new());
+        let expr: hcl::Expression = r#"file("missing.txt")"#.parse().unwrap();
+        let ctx = build_context(&values, &locals, &resolve_ctx);
+
+        let result = evaluate_expression_with_ctx(&expr, &ctx, &resolve_ctx);
+        assert!(result.is_err(), "expected strict file() to error, got {:?}", result);
+        assert_eq!(report.borrow().file_io_failures, 1);
+    }
+
+    #[test]
+    fn file_call_is_deduped_per_stack_file() {
+        let report = Rc::new(RefCell::new(EvalReport::default()));
+        let seen: FileIoSeen = Rc::new(RefCell::new(std::collections::HashSet::new()));
+        let stack_file = camino::Utf8PathBuf::from("/tmp/stack/terragrunt.stack.hcl");
+        let resolve_ctx = ResolveContext::new(camino::Utf8PathBuf::from("/tmp"))
+            .with_eval_report(Rc::clone(&report))
+            .with_file_io_seen(Rc::clone(&seen))
+            .with_stack_file(stack_file);
+
+        let values = Value::Object(hcl::Map::new());
+        let locals = Value::Object(hcl::Map::new());
+        let expr: hcl::Expression = r#"file("x.txt")"#.parse().unwrap();
+        let ctx = build_context(&values, &locals, &resolve_ctx);
+
+        // Two calls to the same (function, stack_file) pair must count once.
+        let _ = evaluate_expression_with_ctx(&expr, &ctx, &resolve_ctx).unwrap();
+        let _ = evaluate_expression_with_ctx(&expr, &ctx, &resolve_ctx).unwrap();
+        assert_eq!(report.borrow().file_io_failures, 1);
+    }
+
+    #[test]
+    fn file_call_warns_and_returns_empty_when_not_strict() {
+        let report = Rc::new(RefCell::new(EvalReport::default()));
+        let resolve_ctx =
+            ResolveContext::new(camino::Utf8PathBuf::from("/tmp")).with_eval_report(Rc::clone(&report));
+
+        let values = Value::Object(hcl::Map::new());
+        let locals = Value::Object(hcl::Map::new());
+        let expr: hcl::Expression = r#"file("missing.txt")"#.parse().unwrap();
+        let ctx = build_context(&values, &locals, &resolve_ctx);
+
+        let out = evaluate_expression_with_ctx(&expr, &ctx, &resolve_ctx).unwrap();
+        assert_eq!(out, Value::String(String::new()));
+        assert_eq!(report.borrow().file_io_failures, 1);
+    }
+
     #[test]
     fn evaluates_merge_with_locals_and_values() {
         let body: hcl::Body = hcl::from_str(
@@ -1054,7 +1343,7 @@ mod tests {
         )
         .unwrap();
         let values = obj(&[("region", Value::String("eu".into()))]);
-        let locals = evaluate_locals(&body, &values).unwrap();
+        let locals = evaluate_locals(&body, &values, &dummy_resolve_ctx()).unwrap();
         let out = eval(
             r#"merge({ a = "../base" }, local.common, { b = format("svc-%s", values.region) })"#,
             &values,

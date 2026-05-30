@@ -47,6 +47,11 @@ pub enum PathExpr {
     /// Reference to a binding from a parent `terragrunt.stack.hcl` unit's `values = { ... }`.
     /// Carries the attribute-traversal path, e.g. `values.foo.bar` → `["foo", "bar"]`.
     ValuesRef(Vec<String>),
+    /// Arbitrary HCL expression that this parser cannot specialise but the
+    /// resolver may still evaluate via the lazy HCL evaluator (e.g.
+    /// `local.foo`, unknown function calls). Carries the raw expression for
+    /// late-bound evaluation.
+    HclExpr(hcl::Expression),
     /// Function we can't evaluate
     Unresolvable {
         func: String,
@@ -227,20 +232,30 @@ fn extract_terraform_block(block: &hcl::Block) -> Option<ExtractedDep> {
 /// Check if a path expression represents a remote source that should be ignored.
 fn is_remote_source(path: &PathExpr) -> bool {
     match path {
-        PathExpr::Literal(s) => {
-            // Remote source patterns to ignore
-            s.starts_with("git::")
-                || s.starts_with("tfr://")
-                || s.starts_with("tfr:///")
-                || s.starts_with("github.com/")
-                || s.starts_with("bitbucket.org/")
-                || s.starts_with("registry.terraform.io/")
-                || s.contains("://") // Any URL scheme
-        }
+        PathExpr::Literal(s) => is_remote_literal(s),
         // Function calls and interpolations are assumed to be local
         // (e.g., ${get_repo_root()}/modules/vpc)
         _ => false,
     }
+}
+
+/// Check if a resolved filesystem path string looks like a remote URL.
+///
+/// Used after HCL evaluation to recognise sources that interpolated to a
+/// `git::...`, `tfr://...`, or other URL form and must therefore be excluded
+/// from dependency tracking.
+pub fn is_remote_path(path: &camino::Utf8Path) -> bool {
+    is_remote_literal(path.as_str())
+}
+
+fn is_remote_literal(s: &str) -> bool {
+    s.starts_with("git::")
+        || s.starts_with("tfr://")
+        || s.starts_with("tfr:///")
+        || s.starts_with("github.com/")
+        || s.starts_with("bitbucket.org/")
+        || s.starts_with("registry.terraform.io/")
+        || s.contains("://")
 }
 
 /// Extract file dependencies from a locals block.
@@ -426,9 +441,7 @@ pub(crate) fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
                         }
                     }
                 }
-                _ => PathExpr::Unresolvable {
-                    func: func_name.to_string(),
-                },
+                _ => PathExpr::HclExpr(expr.clone()),
             }
         }
 
@@ -461,19 +474,15 @@ pub(crate) fn extract_path_expr(expr: &hcl::Expression) -> PathExpr {
 /// Extract a `PathExpr` from a traversal expression.
 ///
 /// Recognises `values.X.Y.Z` as `PathExpr::ValuesRef`. Other traversals
-/// (e.g. `local.foo`, `var.bar`) are left for the HCL evaluator and surface
-/// here as `Unresolvable`.
+/// (e.g. `local.foo`, `var.bar`) are wrapped as `HclExpr` so the resolver can
+/// evaluate them through the HCL evaluator with bound `local`/`values`.
 fn extract_traversal_path(traversal: &hcl::expr::Traversal) -> PathExpr {
     let hcl::Expression::Variable(root) = &traversal.expr else {
-        return PathExpr::Unresolvable {
-            func: format!("traversal root: {:?}", traversal.expr),
-        };
+        return PathExpr::HclExpr(hcl::Expression::Traversal(Box::new(traversal.clone())));
     };
 
     if root.as_str() != "values" {
-        return PathExpr::Unresolvable {
-            func: format!("traversal on {}", root.as_str()),
-        };
+        return PathExpr::HclExpr(hcl::Expression::Traversal(Box::new(traversal.clone())));
     }
 
     let mut keys = Vec::with_capacity(traversal.operators.len());
@@ -481,9 +490,7 @@ fn extract_traversal_path(traversal: &hcl::expr::Traversal) -> PathExpr {
         match op {
             hcl::expr::TraversalOperator::GetAttr(ident) => keys.push(ident.as_str().to_string()),
             _ => {
-                return PathExpr::Unresolvable {
-                    func: format!("non-attr traversal operator: {:?}", op),
-                };
+                return PathExpr::HclExpr(hcl::Expression::Traversal(Box::new(traversal.clone())));
             }
         }
     }
@@ -517,8 +524,17 @@ fn extract_template_expr(template_expr: &hcl::expr::TemplateExpr) -> PathExpr {
                 }
             }
             hcl::template::Element::Interpolation(interp) => {
-                // Interpolation has an expr field (not a method)
-                parts.push(extract_path_expr(&interp.expr));
+                // Interpolation has an expr field (not a method). If the
+                // recursive extraction can't produce a specialised
+                // `PathExpr`, preserve the raw expression so the resolver
+                // can evaluate it through the HCL evaluator.
+                let part = match extract_path_expr(&interp.expr) {
+                    PathExpr::Unresolvable {
+                        ..
+                    } => PathExpr::HclExpr(interp.expr.clone()),
+                    other => other,
+                };
+                parts.push(part);
             }
             hcl::template::Element::Directive(_) => {
                 // Directives (%{...}) are not supported for path expressions
@@ -1149,15 +1165,16 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_path_expr_other_traversal_unresolvable() {
-        // `local.foo` is not a values reference and must not be misclassified.
+    fn test_extract_path_expr_local_traversal_is_hcl_expr() {
+        // `local.foo` is not a values reference; the parser should preserve
+        // the raw expression so the resolver can evaluate it lazily.
         let hcl_str = r#"test = local.foo"#;
         let body: hcl::Body = hcl::from_str(hcl_str).unwrap();
         let attr = body.attributes().next().unwrap();
 
         let path_expr = extract_path_expr(attr.expr());
 
-        assert!(matches!(path_expr, PathExpr::Unresolvable { .. }), "got {:?}", path_expr);
+        assert!(matches!(path_expr, PathExpr::HclExpr(_)), "got {:?}", path_expr);
     }
 
     #[test]
