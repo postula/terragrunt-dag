@@ -66,6 +66,10 @@ pub struct ParseCache {
     cache: RwLock<HashMap<Utf8PathBuf, CachedConfig>>,
     /// Bound values keyed by absolute expanded-unit directory.
     pub stack_bindings: RwLock<HashMap<Utf8PathBuf, StackBinding>>,
+    /// Parsed `terragrunt.stack.hcl` files keyed by canonical path. Avoids
+    /// re-parsing when both discovery and recursive expansion visit the same
+    /// stack file.
+    pub stack_parses: RwLock<HashMap<Utf8PathBuf, crate::stack::ParsedStack>>,
 }
 
 impl ParseCache {
@@ -74,6 +78,7 @@ impl ParseCache {
         Self {
             cache: RwLock::new(HashMap::new()),
             stack_bindings: RwLock::new(HashMap::new()),
+            stack_parses: RwLock::new(HashMap::new()),
         }
     }
 

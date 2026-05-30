@@ -176,21 +176,37 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
     }
 
     let cache = ParseCache::new();
-    let expanded = stack::expand(discovered.units, &discovered.stack_files, &cache);
+    let expanded = stack::expand_with_options(
+        discovered.units,
+        &discovered.stack_files,
+        &cache,
+        terragrunt_dag::resolver::ResolveOptions {
+            strict: cli.strict,
+            ..Default::default()
+        },
+    );
 
     if cli.verbose && !expanded.synthetic_projects.is_empty() {
         eprintln!("Expanded stacks into {} synthetic units", expanded.synthetic_projects.len());
     }
 
-    if expanded.unresolved_values_count > 0 {
+    if !expanded.eval_report.is_empty() {
+        let report = expanded.eval_report;
         eprintln!(
-            "Warning: {} stack unit(s) had unresolvable `values` expressions; dependency edges skipped",
-            expanded.unresolved_values_count
+            "Warning: {} soft eval failure(s) during stack expansion (values: {}, source paths: {}, file I/O stubs: {}, recursion cycles: {}, remote sources skipped: {}, missing child stacks: {}, depth exceeded: {})",
+            report.total(),
+            report.values_failures,
+            report.source_path_failures,
+            report.file_io_failures,
+            report.cycle_skipped,
+            report.remote_sources_skipped,
+            report.missing_child_stack,
+            report.recursion_depth_exceeded,
         );
         if cli.strict {
             return Err(format!(
-                "Unresolvable stack `values` for {} unit(s) (use without --strict to continue)",
-                expanded.unresolved_values_count
+                "{} soft eval failure(s) under --strict (use without --strict to continue)",
+                report.total()
             )
             .into());
         }

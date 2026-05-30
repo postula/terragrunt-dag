@@ -1,9 +1,41 @@
 //! Resolve paths and evaluate terragrunt functions.
 
 use camino::{Utf8Path, Utf8PathBuf};
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashSet;
+use std::rc::Rc;
 
 use crate::parser::PathExpr;
+use crate::stack::EvalReport;
+
+/// Shared dedup set for file-IO stub calls.
+///
+/// Keyed by `(function name, stack file path)` so a `file("x")` call repeated
+/// across N units of the same stack file only increments `file_io_failures`
+/// once. Shared via `Rc<RefCell<...>>` so every nested HCL evaluation sees
+/// the same set.
+pub type FileIoSeen = Rc<RefCell<HashSet<(String, Utf8PathBuf)>>>;
+
+/// Caller-facing knobs that influence soft-failure handling.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolveOptions {
+    /// When `true`, the CLI escalates any recorded eval failure into a hard
+    /// error after expansion completes.
+    pub strict: bool,
+    /// Hard limit on how deep `stack { source = "..." }` recursion is followed
+    /// during expansion. Prevents pathological loops from `terragrunt.stack.hcl`
+    /// trees that reference each other.
+    pub max_recursion_depth: usize,
+}
+
+impl Default for ResolveOptions {
+    fn default() -> Self {
+        Self {
+            strict: false,
+            max_recursion_depth: 32,
+        }
+    }
+}
 
 /// Resolution context - provides base paths for resolution
 pub struct ResolveContext {
@@ -15,6 +47,22 @@ pub struct ResolveContext {
     /// Bound `values` from a parent `terragrunt.stack.hcl` for the current
     /// expanded unit. `None` when this context is not evaluating a stack unit.
     pub values: Option<hcl::Value>,
+    /// Bound `local` object visible to lazy HCL evaluation of source paths.
+    pub locals: Option<hcl::Value>,
+    /// Directory of the parent stack file, exposed to HCL evaluation via
+    /// `get_parent_terragrunt_dir()`.
+    pub parent_dir: Option<Utf8PathBuf>,
+    /// Resolution options inherited from the CLI.
+    pub options: ResolveOptions,
+    /// Shared mutable eval report used to record soft failures from inside
+    /// HCL function stubs.
+    pub eval_report: Option<Rc<RefCell<EvalReport>>>,
+    /// Shared dedup set so repeated file-IO stub calls inside one stack
+    /// expansion are counted once.
+    pub file_io_seen: Option<FileIoSeen>,
+    /// Identifier (typically the stack file path) used as part of the
+    /// dedup key when present.
+    pub stack_file: Option<Utf8PathBuf>,
     /// Cached repo root (lazily computed)
     repo_root: OnceCell<Option<Utf8PathBuf>>,
 }
@@ -26,6 +74,12 @@ impl ResolveContext {
             config_dir: project_dir.clone(),
             project_dir,
             values: None,
+            locals: None,
+            parent_dir: None,
+            options: ResolveOptions::default(),
+            eval_report: None,
+            file_io_seen: None,
+            stack_file: None,
             repo_root: OnceCell::new(),
         }
     }
@@ -37,6 +91,12 @@ impl ResolveContext {
             config_dir,
             project_dir,
             values: None,
+            locals: None,
+            parent_dir: None,
+            options: ResolveOptions::default(),
+            eval_report: None,
+            file_io_seen: None,
+            stack_file: None,
             repo_root: OnceCell::new(),
         }
     }
@@ -45,6 +105,52 @@ impl ResolveContext {
     pub fn with_values(mut self, values: hcl::Value) -> Self {
         self.values = Some(values);
         self
+    }
+
+    /// Attach bound `locals` for HCL evaluation of source paths.
+    pub fn with_locals(mut self, locals: hcl::Value) -> Self {
+        self.locals = Some(locals);
+        self
+    }
+
+    /// Attach the parent stack directory, exposed via `get_parent_terragrunt_dir()`.
+    pub fn with_parent_dir(mut self, parent_dir: Utf8PathBuf) -> Self {
+        self.parent_dir = Some(parent_dir);
+        self
+    }
+
+    /// Apply caller-facing resolution options.
+    pub fn with_options(mut self, opts: ResolveOptions) -> Self {
+        self.options = opts;
+        self
+    }
+
+    /// Attach a shared eval report that HCL function stubs will mutate when
+    /// they record a soft failure.
+    pub fn with_eval_report(mut self, eval_report: Rc<RefCell<EvalReport>>) -> Self {
+        self.eval_report = Some(eval_report);
+        self
+    }
+
+    /// Attach a shared file-IO dedup set so repeated stub calls within one
+    /// stack expansion are counted once.
+    pub fn with_file_io_seen(mut self, seen: FileIoSeen) -> Self {
+        self.file_io_seen = Some(seen);
+        self
+    }
+
+    /// Attach the parent stack file path, used as part of the file-IO
+    /// dedup key.
+    pub fn with_stack_file(mut self, stack_file: Utf8PathBuf) -> Self {
+        self.stack_file = Some(stack_file);
+        self
+    }
+
+    /// Increment `source_path_failures` on the attached eval report, if any.
+    pub(crate) fn record_source_path_failure(&self) {
+        if let Some(report) = self.eval_report.as_ref() {
+            report.borrow_mut().source_path_failures += 1;
+        }
     }
 
     /// Resolve a PathExpr to an actual filesystem path.
@@ -141,6 +247,15 @@ impl ResolveContext {
                         PathExpr::Literal(s) => {
                             result.push_str(s);
                         }
+                        // Raw HCL expressions evaluate to a string fragment
+                        // (e.g. `${local.unseal_type}` → "gcp"). Splice the
+                        // raw string in without re-resolving as a path.
+                        PathExpr::HclExpr(expr) => {
+                            let Some(fragment) = self.evaluate_hcl_to_string(expr) else {
+                                return vec![];
+                            };
+                            result.push_str(&fragment);
+                        }
                         // Other expressions need to be resolved
                         _ => match self.resolve(part) {
                             Some(resolved) => {
@@ -179,11 +294,49 @@ impl ResolveContext {
                 self.resolve_all(&PathExpr::Literal(literal))
             }
 
+            PathExpr::HclExpr(expr) => self.resolve_hcl_expr(expr),
+
             PathExpr::Unresolvable {
                 ..
             } => {
                 // Can't resolve - return empty vec
                 vec![]
+            }
+        }
+    }
+
+    /// Evaluate a raw HCL expression and, on success, feed the resulting
+    /// string back through `Literal` resolution. Records a soft failure if
+    /// evaluation fails so the CLI can escalate under `--strict`.
+    fn resolve_hcl_expr(&self, expr: &hcl::Expression) -> Vec<Utf8PathBuf> {
+        let values = self.values.clone().unwrap_or_else(|| hcl::Value::Object(hcl::Map::new()));
+        let locals = self.locals.clone().unwrap_or_else(|| hcl::Value::Object(hcl::Map::new()));
+        let ctx = crate::hcl_eval::build_context(&values, &locals, self);
+        match crate::hcl_eval::evaluate_expression_with_ctx(expr, &ctx, self) {
+            Ok(hcl::Value::String(s)) => self.resolve_all(&PathExpr::Literal(s)),
+            Ok(_) => {
+                self.record_source_path_failure();
+                vec![]
+            }
+            Err(_) => {
+                self.record_source_path_failure();
+                vec![]
+            }
+        }
+    }
+
+    /// Evaluate a raw HCL expression and return the resulting string
+    /// without applying path-resolution semantics. Used to splice
+    /// `${expr}` fragments into an enclosing interpolation.
+    fn evaluate_hcl_to_string(&self, expr: &hcl::Expression) -> Option<String> {
+        let values = self.values.clone().unwrap_or_else(|| hcl::Value::Object(hcl::Map::new()));
+        let locals = self.locals.clone().unwrap_or_else(|| hcl::Value::Object(hcl::Map::new()));
+        let ctx = crate::hcl_eval::build_context(&values, &locals, self);
+        match crate::hcl_eval::evaluate_expression_with_ctx(expr, &ctx, self) {
+            Ok(hcl::Value::String(s)) => Some(s),
+            _ => {
+                self.record_source_path_failure();
+                None
             }
         }
     }
@@ -757,6 +910,61 @@ mod tests {
         let result = ctx.resolve(&PathExpr::ValuesRef(vec!["dep".to_string()]));
 
         assert_eq!(result, None);
+    }
+
+    // ============== HclExpr resolution ==============
+
+    fn parse_expr(src: &str) -> hcl::Expression {
+        src.parse().unwrap_or_else(|e| panic!("failed to parse {:?}: {}", src, e))
+    }
+
+    #[test]
+    fn test_resolve_hcl_expr_with_get_repo_root() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir);
+
+        // ${get_repo_root()}/modules/vpc as a raw HCL expression.
+        let expr = parse_expr(r#""${get_repo_root()}/modules/vpc""#);
+        let path_expr = PathExpr::HclExpr(expr);
+
+        let result = ctx.resolve(&path_expr);
+        assert_eq!(result, Some(fixture_path("repo/modules/vpc")));
+    }
+
+    #[test]
+    fn test_resolve_hcl_expr_with_values_ref_via_eval() {
+        // `values.dep` evaluated through the HCL evaluator (not via the
+        // dedicated ValuesRef variant) still resolves correctly.
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let ctx = ResolveContext::new(project_dir)
+            .with_values(make_values_object(&[("dep", hcl::Value::String("../sg".to_string()))]));
+
+        let expr = parse_expr("values.dep");
+        let path_expr = PathExpr::HclExpr(expr);
+
+        let result = ctx.resolve(&path_expr);
+        assert_eq!(result, Some(fixture_path("repo/live/prod/sg")));
+    }
+
+    #[test]
+    fn test_resolve_hcl_expr_strict_propagates_eval_error() {
+        let project_dir = fixture_path("repo/live/prod/vpc");
+        let report = std::rc::Rc::new(std::cell::RefCell::new(crate::stack::EvalReport::default()));
+        let ctx = ResolveContext::new(project_dir)
+            .with_options(ResolveOptions {
+                strict: true,
+                ..Default::default()
+            })
+            .with_eval_report(std::rc::Rc::clone(&report));
+
+        // `values.missing` will raise an HCL eval error since `values` has no
+        // such key.
+        let expr = parse_expr("values.missing");
+        let path_expr = PathExpr::HclExpr(expr);
+
+        let result = ctx.resolve(&path_expr);
+        assert_eq!(result, None);
+        assert_eq!(report.borrow().source_path_failures, 1);
     }
 
     #[test]

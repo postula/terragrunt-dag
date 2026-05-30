@@ -109,7 +109,7 @@ fn test_cli_unresolvable_values_errors_with_strict() {
 
     assert!(!output.status.success(), "strict mode should fail when values are unresolvable");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Unresolvable"), "expected strict error in stderr, got: {}", stderr);
+    assert!(stderr.contains("under --strict"), "expected strict error in stderr, got: {}", stderr);
 }
 
 #[test]
