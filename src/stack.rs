@@ -719,8 +719,7 @@ fn fold_frames(
             Rc::clone(&file_io_seen),
             Some(frame.stack_file.clone()),
         );
-        let locals =
-            evaluate_locals(&frame.parsed.body, &outer, &resolve_ctx).unwrap_or_else(|_| empty_object());
+        let locals = evaluate_locals(&frame.parsed.body, &outer, &resolve_ctx).unwrap_or_else(|_| empty_object());
         let unit = &frame.parsed.units[frame.unit_index];
         let evaluated = evaluate_unit_values(unit, &outer, &locals, &frame.stack_file, &resolve_ctx)?;
         outer = evaluated;
@@ -1028,17 +1027,9 @@ mod tests {
             expanded.synthetic_projects.iter().map(|p| &p.dir).collect::<Vec<_>>()
         );
         let unit = &expanded.synthetic_projects[0];
-        assert!(
-            unit.dir.as_str().ends_with("/.terragrunt-stack/unseal"),
-            "synthetic unit dir mismatch: {}",
-            unit.dir
-        );
+        assert!(unit.dir.as_str().ends_with("/.terragrunt-stack/unseal"), "synthetic unit dir mismatch: {}", unit.dir);
         // Soft failures must not have fired for this fully resolved fixture.
-        assert!(
-            expanded.eval_report.is_empty(),
-            "expected no eval failures, got: {:?}",
-            expanded.eval_report
-        );
+        assert!(expanded.eval_report.is_empty(), "expected no eval failures, got: {:?}", expanded.eval_report);
     }
 
     #[test]
@@ -1238,7 +1229,11 @@ mod tests {
         let expanded = expand(Vec::new(), &[top], &cache);
 
         let dirs: Vec<&str> = expanded.synthetic_projects.iter().map(|p| p.dir.as_str()).collect();
-        assert!(!dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/outer")), "outer shell must be dropped: {:?}", dirs);
+        assert!(
+            !dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/outer")),
+            "outer shell must be dropped: {:?}",
+            dirs
+        );
         assert_eq!(expanded.synthetic_projects.len(), 2, "exactly the two leaves should remain: {:?}", dirs);
     }
 
@@ -1311,7 +1306,11 @@ mod tests {
         let cache = ParseCache::new();
         let expanded = expand(Vec::new(), &[top], &cache);
 
-        assert!(expanded.eval_report.cycle_skipped >= 1, "expected at least one cycle_skipped, got: {:?}", expanded.eval_report);
+        assert!(
+            expanded.eval_report.cycle_skipped >= 1,
+            "expected at least one cycle_skipped, got: {:?}",
+            expanded.eval_report
+        );
     }
 
     #[test]
@@ -1375,7 +1374,12 @@ mod tests {
             .synthetic_projects
             .iter()
             .find(|p| p.dir.as_str().ends_with("/.terragrunt-stack/x"))
-            .unwrap_or_else(|| panic!("expected leaf 'x'; got: {:?}", expanded.synthetic_projects.iter().map(|p| &p.dir).collect::<Vec<_>>()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected leaf 'x'; got: {:?}",
+                    expanded.synthetic_projects.iter().map(|p| &p.dir).collect::<Vec<_>>()
+                )
+            });
         // The bound source module (resolved relative to the child stack dir)
         // should appear in the unit's watch_files glob.
         assert!(
@@ -1423,13 +1427,17 @@ mod tests {
         );
 
         let top = root.join("live/terragrunt.stack.hcl").canonicalize_utf8().unwrap();
-        let materialized =
-            root.join("live/.terragrunt-stack/consul/terragrunt.stack.hcl").canonicalize_utf8().unwrap();
+        let materialized = root.join("live/.terragrunt-stack/consul/terragrunt.stack.hcl").canonicalize_utf8().unwrap();
         let cache = ParseCache::new();
         let expanded = expand(Vec::new(), &[top, materialized], &cache);
 
         let agent_count = expanded.synthetic_projects.iter().filter(|p| p.dir.as_str().ends_with("/agent")).count();
-        assert_eq!(agent_count, 1, "leaf 'agent' should appear exactly once; got: {:?}", expanded.synthetic_projects.iter().map(|p| &p.dir).collect::<Vec<_>>());
+        assert_eq!(
+            agent_count,
+            1,
+            "leaf 'agent' should appear exactly once; got: {:?}",
+            expanded.synthetic_projects.iter().map(|p| &p.dir).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1467,9 +1475,21 @@ mod tests {
         let expanded = expand(Vec::new(), &[top], &cache);
 
         let dirs: Vec<&str> = expanded.synthetic_projects.iter().map(|p| p.dir.as_str()).collect();
-        assert!(dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/inline")), "inline unit must be emitted: {:?}", dirs);
-        assert!(dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/child")), "recursed child must be emitted: {:?}", dirs);
-        assert!(!dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/outer")), "outer shell must be dropped: {:?}", dirs);
+        assert!(
+            dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/inline")),
+            "inline unit must be emitted: {:?}",
+            dirs
+        );
+        assert!(
+            dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/child")),
+            "recursed child must be emitted: {:?}",
+            dirs
+        );
+        assert!(
+            !dirs.iter().any(|d| d.ends_with("/.terragrunt-stack/outer")),
+            "outer shell must be dropped: {:?}",
+            dirs
+        );
     }
 
     #[test]
@@ -1502,6 +1522,10 @@ mod tests {
             },
         );
 
-        assert!(expanded.eval_report.total() > 0, "strict should record an eval failure; got: {:?}", expanded.eval_report);
+        assert!(
+            expanded.eval_report.total() > 0,
+            "strict should record an eval failure; got: {:?}",
+            expanded.eval_report
+        );
     }
 }

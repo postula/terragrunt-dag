@@ -69,10 +69,7 @@ fn record_file_io_failure(func_name: &str) {
     AMBIENT.with(|cell| {
         let ambient = cell.borrow();
         if let Some(seen) = ambient.file_io_seen.as_ref() {
-            let key = (
-                func_name.to_string(),
-                ambient.stack_file.clone().unwrap_or_else(|| Utf8PathBuf::from("")),
-            );
+            let key = (func_name.to_string(), ambient.stack_file.clone().unwrap_or_else(|| Utf8PathBuf::from("")));
             if !seen.borrow_mut().insert(key) {
                 return;
             }
@@ -185,7 +182,10 @@ fn register_terragrunt_stubs(ctx: &mut Context<'_>) {
     ctx.declare_func("jsondecode", FuncDef::builder().param(ParamType::String).build(jsondecode_stub));
     ctx.declare_func("yamldecode", FuncDef::builder().param(ParamType::String).build(yamldecode_stub));
     ctx.declare_func("file", FuncDef::builder().param(ParamType::String).build(file_stub));
-    ctx.declare_func("read_terragrunt_config", FuncDef::builder().param(ParamType::Any).build(read_terragrunt_config_stub));
+    ctx.declare_func(
+        "read_terragrunt_config",
+        FuncDef::builder().param(ParamType::Any).build(read_terragrunt_config_stub),
+    );
     ctx.declare_func(
         "templatefile",
         FuncDef::builder()
@@ -1319,8 +1319,7 @@ mod tests {
     #[test]
     fn file_call_warns_and_returns_empty_when_not_strict() {
         let report = Rc::new(RefCell::new(EvalReport::default()));
-        let resolve_ctx =
-            ResolveContext::new(camino::Utf8PathBuf::from("/tmp")).with_eval_report(Rc::clone(&report));
+        let resolve_ctx = ResolveContext::new(camino::Utf8PathBuf::from("/tmp")).with_eval_report(Rc::clone(&report));
 
         let values = Value::Object(hcl::Map::new());
         let locals = Value::Object(hcl::Map::new());
