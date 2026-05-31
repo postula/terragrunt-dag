@@ -151,14 +151,14 @@ fn expand_resolves_source_with_get_repo_root_and_local() {
     assert!(output.status.success(), "binary failed: stderr={}", String::from_utf8_lossy(&output.stderr));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: GhaOutput =
-        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid JSON: {}: {}", e, stdout));
+    let parsed: GhaOutput = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid JSON: {}: {}", e, stdout));
 
-    let unseal = parsed
-        .include
-        .iter()
-        .find(|p| p.name.contains("unseal"))
-        .unwrap_or_else(|| panic!("expected synthetic `unseal` unit; rows: {:?}", parsed.include.iter().map(|p| &p.name).collect::<Vec<_>>()));
+    let unseal = parsed.include.iter().find(|p| p.name.contains("unseal")).unwrap_or_else(|| {
+        panic!(
+            "expected synthetic `unseal` unit; rows: {:?}",
+            parsed.include.iter().map(|p| &p.name).collect::<Vec<_>>()
+        )
+    });
 
     // Source resolves via `${get_repo_root()}/modules/vault/unseal/${local.unseal_type}`;
     // the synthetic unit lives under the stack's `.terragrunt-stack/unseal`.
