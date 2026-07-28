@@ -29,6 +29,6 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
       - name: Publish to crates.io
-        run: cargo publish --token "${CRATES_IO_TOKEN}"
+        run: cargo publish --locked --token "${CRATES_IO_TOKEN}"
         env:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
