@@ -22,7 +22,7 @@
 
   [dependencies.serde]
     features = ["derive"]
-    version = "1.0.228"
+    version = "1.0.229"
 
 [dev-dependencies]
   rstest = "0.26.1"
