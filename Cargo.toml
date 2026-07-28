@@ -37,7 +37,14 @@
   categories = ["command-line-utilities", "development-tools::build-utils"]
   description = "Walk a Terragrunt monorepo and emit CI matrix configuration (Atlantis, Digger, GitHub Actions)"
   edition = "2024"
-  exclude = ["tests/fixtures/**", ".github/**", "updatecli/**", "updatecli-compose.yaml", ".pre-commit-config.yaml", ".gitattributes"]
+  exclude = [
+    "tests/fixtures/**",
+    ".github/**",
+    "updatecli/**",
+    "updatecli-compose.yaml",
+    ".pre-commit-config.yaml",
+    ".gitattributes",
+  ]
   homepage = "https://github.com/postula/terragrunt-dag"
   keywords = ["terragrunt", "terraform", "dag", "ci", "atlantis"]
   license = "AGPL-3.0-or-later"
