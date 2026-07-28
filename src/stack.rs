@@ -205,7 +205,7 @@ pub fn expand_with_options(
     let mut state = ExpandState::new();
 
     for stack_file in stack_files {
-        expand_stack_file(stack_file, None, 0, &opts, cache, &mut state);
+        expand_stack_file(stack_file, None, None, 0, &opts, cache, &mut state);
     }
 
     // Filter real unit dirs: drop shared-module sources and any unit dirs we
@@ -262,9 +262,14 @@ impl ExpandState {
 /// outer values are folded from any materialized `.terragrunt-stack/` ancestors.
 /// When `Some`, recursion supplies the parent stack's evaluated `values = {...}`
 /// directly so child `unit` / `stack` blocks see `values.X`.
+/// `materialized_base` is the directory whose `.terragrunt-stack/` holds this
+/// stack's units. It differs from `stack_dir` whenever a `stack` block sources
+/// a tree elsewhere in the repo: the units belong to the parent's materialized
+/// path, not to the sourced tree. `None` means "materializes in place".
 fn expand_stack_file(
     stack_file: &Utf8Path,
     inherited_values: Option<hcl::Value>,
+    materialized_base: Option<&Utf8Path>,
     depth: usize,
     opts: &ResolveOptions,
     cache: &ParseCache,
@@ -369,7 +374,7 @@ fn expand_stack_file(
 
         state.excluded_sources.insert(canonical_source.clone());
 
-        let unit_dir = stack_dir.join(".terragrunt-stack").join(&unit.path);
+        let unit_dir = materialized_base.unwrap_or(&stack_dir).join(".terragrunt-stack").join(&unit.path);
         let canonical_unit_dir = unit_dir.canonicalize_utf8().unwrap_or_else(|_| unit_dir.clone());
         state.excluded_unit_dirs.insert(canonical_unit_dir.clone());
 
@@ -414,6 +419,7 @@ fn expand_stack_file(
                 &stack_locals,
                 stack_file,
                 &resolve_ctx,
+                &unit_dir,
                 depth,
                 opts,
                 cache,
@@ -465,6 +471,7 @@ fn try_recurse_into_child_stack(
     parent_locals: &hcl::Value,
     parent_stack_file: &Utf8Path,
     parent_resolve_ctx: &ResolveContext,
+    parent_unit_dir: &Utf8Path,
     depth: usize,
     opts: &ResolveOptions,
     cache: &ParseCache,
@@ -494,7 +501,7 @@ fn try_recurse_into_child_stack(
             .unwrap_or_else(|| outer_values.clone());
 
     let leaves_before = state.synthetic_projects.len();
-    expand_stack_file(&canonical_child, Some(evaluated_values), depth + 1, opts, cache, state);
+    expand_stack_file(&canonical_child, Some(evaluated_values), Some(parent_unit_dir), depth + 1, opts, cache, state);
     if state.synthetic_projects.len() > leaves_before {
         RecurseOutcome::ChildrenEmitted
     } else {
@@ -529,15 +536,11 @@ fn build_synthetic_project(
             // Resolve dependencies from it but report the synthetic unit's dir.
             let module_hcl = source_module.join("terragrunt.hcl");
             if module_hcl.exists() {
-                let result = match bound_values.clone() {
-                    Some(values) => process_project_with_deps_with_values(source_module, cache, true, values),
-                    None => process_project_with_deps(source_module, cache, true),
+                let anchor = crate::processor::UnitAnchor {
+                    source_module: source_module.to_path_buf(),
+                    unit_dir: unit_dir.to_path_buf(),
                 };
-                result.map(|mut p| {
-                    p.dir = unit_dir.to_path_buf();
-                    p.name = derive_project_name(unit_dir);
-                    p
-                })
+                crate::processor::process_synthetic_unit(&anchor, cache, true, bound_values.clone())
             } else {
                 return Project {
                     name: derive_project_name(unit_dir),
@@ -1262,6 +1265,90 @@ mod tests {
         assert!(
             expanded.synthetic_projects.iter().any(|p| p.dir.as_str().ends_with("/.terragrunt-stack/only_tg")),
             "parent shell must be kept when recursion can't find a child stack file"
+        );
+    }
+
+    /// Regression for #48: a `stack` block whose source lives outside the
+    /// discovery root must still materialize its units under the parent's
+    /// `.terragrunt-stack/` tree, with sibling dependencies wired between them.
+    #[test]
+    fn test_recursed_units_materialize_under_parent_not_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap().canonicalize_utf8().unwrap();
+
+        // Discovery root is `live/`; the stack source lives in a sibling tree.
+        let live = write_stack(
+            &root.join("live"),
+            r#"
+            stack "vault" {
+              source = "../stacks/vault"
+              path   = "vault"
+            }
+            "#,
+        );
+        write_stack(
+            &root.join("stacks/vault"),
+            r#"
+            unit "backends" {
+              source = "../../modules/backends"
+              path   = "backends"
+            }
+            unit "roles" {
+              source = "../../modules/roles"
+              path   = "roles"
+              values = {
+                dependencies_path = { backends = "../backends" }
+              }
+            }
+            "#,
+        );
+        write_terragrunt(&root.join("modules/backends"));
+        std::fs::create_dir_all(root.join("modules/roles").as_std_path()).unwrap();
+        std::fs::write(
+            root.join("modules/roles/terragrunt.hcl").as_std_path(),
+            r#"
+            dependency "backends" {
+              config_path = values.dependencies_path.backends
+            }
+            terraform { source = "." }
+            "#,
+        )
+        .unwrap();
+
+        let cache = ParseCache::new();
+        let expanded = expand(Vec::new(), &[live], &cache);
+
+        let dirs: Vec<&str> = expanded.synthetic_projects.iter().map(|p| p.dir.as_str()).collect();
+
+        // Units belong to the parent's materialized tree, not the source tree.
+        let expected_base = root.join("live/.terragrunt-stack/vault/.terragrunt-stack");
+        for unit in ["backends", "roles"] {
+            let want = expected_base.join(unit);
+            assert!(
+                dirs.iter().any(|d| *d == want.as_str()),
+                "unit '{}' should materialize at {}, got {:?}",
+                unit,
+                want,
+                dirs
+            );
+        }
+
+        // Nothing may be emitted outside the discovery root.
+        let live_root = root.join("live");
+        for d in &dirs {
+            assert!(d.starts_with(live_root.as_str()), "unit emitted outside root {}: {}", live_root, d);
+        }
+
+        // `../backends` must point at the sibling unit, not the module source.
+        let roles = expanded
+            .synthetic_projects
+            .iter()
+            .find(|p| p.dir.as_str().ends_with("/roles"))
+            .expect("roles unit must exist");
+        assert!(
+            roles.project_dependencies.iter().any(|d| d == expected_base.join("backends").as_str()),
+            "roles must depend on the sibling backends unit, got {:?}",
+            roles.project_dependencies
         );
     }
 

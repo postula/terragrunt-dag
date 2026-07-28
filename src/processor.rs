@@ -237,11 +237,59 @@ pub fn process_project_with_deps_with_values(
     process_project_with_deps_inner(project_dir, cache, cascade, Some(values))
 }
 
+/// Maps a shared module's on-disk location to the `.terragrunt-stack/` path a
+/// stack unit materializes at.
+///
+/// Terragrunt copies the module tree into the unit directory, so a relative
+/// `config_path` resolves from the generated location, not from the module
+/// source. Config files are still read from `source_module`, which is the only
+/// place they exist when the stack has not been generated.
+pub struct UnitAnchor {
+    pub source_module: Utf8PathBuf,
+    pub unit_dir: Utf8PathBuf,
+}
+
+impl UnitAnchor {
+    /// Rebase `dir` from the module tree onto the materialized unit tree.
+    fn remap(&self, dir: &Utf8Path) -> Utf8PathBuf {
+        match dir.strip_prefix(&self.source_module) {
+            Ok(rest) => self.unit_dir.join(rest),
+            Err(_) => dir.to_path_buf(),
+        }
+    }
+}
+
+/// Variant of [`process_project_with_deps_with_values`] for a stack unit whose
+/// `.terragrunt-stack/` directory has not been generated on disk.
+///
+/// Reads config from `anchor.source_module` but resolves dependency paths as
+/// if it lived at `anchor.unit_dir`, so siblings link to each other instead of
+/// to the shared module sources.
+pub fn process_synthetic_unit(
+    anchor: &UnitAnchor,
+    cache: &ParseCache,
+    cascade: bool,
+    values: Option<hcl::Value>,
+) -> Result<Project, ProcessError> {
+    let source_module = anchor.source_module.clone();
+    process_project_with_deps_inner_anchored(&source_module, cache, cascade, values, Some(anchor))
+}
+
 fn process_project_with_deps_inner(
     project_dir: &Utf8Path,
     cache: &ParseCache,
     cascade: bool,
     values: Option<hcl::Value>,
+) -> Result<Project, ProcessError> {
+    process_project_with_deps_inner_anchored(project_dir, cache, cascade, values, None)
+}
+
+fn process_project_with_deps_inner_anchored(
+    project_dir: &Utf8Path,
+    cache: &ParseCache,
+    cascade: bool,
+    values: Option<hcl::Value>,
+    anchor: Option<&UnitAnchor>,
 ) -> Result<Project, ProcessError> {
     use std::collections::HashSet;
 
@@ -262,6 +310,7 @@ fn process_project_with_deps_inner(
         has_terraform_source: &mut has_terraform_source,
         cascade,
         values: values.as_ref(),
+        anchor,
     };
     load_config_recursive(&terragrunt_file, &mut ctx)?;
 
@@ -272,9 +321,11 @@ fn process_project_with_deps_inner(
     watch_files.sort();
     watch_files.dedup();
 
+    let reported_dir = anchor.map(|a| a.unit_dir.clone()).unwrap_or_else(|| project_dir.to_path_buf());
+
     Ok(Project {
-        name: derive_project_name(&project_dir.to_path_buf()),
-        dir: project_dir.to_path_buf(),
+        name: derive_project_name(&reported_dir),
+        dir: reported_dir,
         project_dependencies,
         watch_files,
         has_terraform_source,
@@ -292,6 +343,8 @@ struct LoadContext<'a> {
     cascade: bool,
     /// Bound `values` for the unit currently being processed.
     values: Option<&'a hcl::Value>,
+    /// Set when processing a stack unit that has not been generated on disk.
+    anchor: Option<&'a UnitAnchor>,
 }
 
 /// Recursively load a config file and collect its dependencies.
@@ -342,6 +395,24 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
         resolve_ctx = resolve_ctx.with_values(bound.clone());
     }
 
+    // Dependency targets are the one thing that must resolve from where the
+    // unit materializes rather than from where its config is read. Includes and
+    // file reads stay anchored to the module tree, the only place those files
+    // exist before `terragrunt stack generate` runs.
+    let (dep_dir, dep_resolve_ctx) = match ctx.anchor {
+        Some(anchor) => {
+            let dep_dir = anchor.remap(&config_dir);
+            let mut dep_ctx =
+                ResolveContext::for_included_config(dep_dir.clone(), anchor.remap(ctx.project_dir).to_path_buf());
+            if let Some(bound) = ctx.values {
+                dep_ctx = dep_ctx.with_values(bound.clone());
+            }
+            (dep_dir, Some(dep_ctx))
+        }
+        None => (config_dir.clone(), None),
+    };
+    let dep_resolve_ctx = dep_resolve_ctx.as_ref().unwrap_or(&resolve_ctx);
+
     // Process each dependency
     for dep in deps {
         match dep.kind {
@@ -360,7 +431,7 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
                 // Resolve NOW with correct context
                 // Use resolve_all to handle conditional expressions (both branches)
                 // Store absolute path as string - output module will convert to name
-                for resolved in resolve_ctx.resolve_all(&dep.path) {
+                for resolved in dep_resolve_ctx.resolve_all(&dep.path) {
                     // Skip empty paths and paths that don't look like valid projects
                     // (conditional deps often have "" as fallback)
                     if resolved.as_str().is_empty() {
@@ -368,12 +439,12 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
                     }
 
                     // Skip if this resolves to the config directory itself (empty path resolution)
-                    if resolved == config_dir {
+                    if resolved == dep_dir {
                         continue;
                     }
 
                     // Skip self-references (project depending on itself)
-                    if resolved == ctx.project_dir {
+                    if resolved == ctx.project_dir || ctx.anchor.is_some_and(|a| resolved == a.unit_dir) {
                         continue;
                     }
 
@@ -459,6 +530,9 @@ fn load_config_recursive(config_path: &Utf8Path, ctx: &mut LoadContext) -> Resul
                     // Bound `values` apply only to the synthetic unit itself, not
                     // to its transitive dependencies.
                     values: None,
+                    // Transitive dependencies are real on-disk projects, so they
+                    // resolve from their own location.
+                    anchor: None,
                 };
                 load_config_recursive(&dep_hcl_path, &mut dep_ctx)?;
 
