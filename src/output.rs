@@ -8,6 +8,64 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// A declared dependency that no emitted project occupies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DanglingDependency {
+    pub project: String,
+    /// Directory of the unit declaring the dependency.
+    pub project_dir: String,
+    pub target: String,
+}
+
+/// Summary of how many dependency edges survive into the layering pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyLinkage {
+    /// Dependencies naming a directory outside the emitted set.
+    pub dangling: Vec<DanglingDependency>,
+    /// Dependencies resolving to an emitted project.
+    pub resolved: usize,
+}
+
+impl DependencyLinkage {
+    /// Every declared dependency dangles, so layering has nothing to order by
+    /// and emits a flat layer 0. Legitimate when a filter removed the targets,
+    /// otherwise the paths are anchored to the wrong tree.
+    pub fn is_fully_collapsed(&self) -> bool {
+        self.resolved == 0 && !self.dangling.is_empty()
+    }
+}
+
+/// Classify dependency edges as resolved or dangling.
+///
+/// [`compute_layers`] silently drops dependencies it cannot map to a project,
+/// which turns a mis-anchored dependency path into a unit that looks
+/// independent. This reports what was dropped.
+pub fn analyze_dependency_linkage(projects: &[Project]) -> DependencyLinkage {
+    let dirs: HashSet<&str> = projects.iter().map(|p| p.dir.as_str()).collect();
+
+    let mut dangling = Vec::new();
+    let mut resolved = 0;
+
+    for project in projects {
+        for dep in &project.project_dependencies {
+            if dirs.contains(dep.as_str()) {
+                resolved += 1;
+            } else {
+                dangling.push(DanglingDependency {
+                    project: project.name.clone(),
+                    project_dir: project.dir.to_string(),
+                    target: dep.clone(),
+                });
+            }
+        }
+    }
+
+    DependencyLinkage {
+        dangling,
+        resolved,
+    }
+}
+
 /// Compute execution order layers from project dependencies.
 /// Returns a map from project name to layer number.
 ///
@@ -896,6 +954,79 @@ mod tests {
 
         let depends_on = &parsed["projects"][0]["depends_on"];
         assert!(depends_on.is_null() || depends_on.as_sequence().map(|s| s.is_empty()).unwrap_or(true));
+    }
+
+    // ============== Dependency Linkage Tests ==============
+
+    fn linkage_project(name: &str, dir: &str, deps: &[&str]) -> Project {
+        Project {
+            name: name.to_string(),
+            dir: Utf8PathBuf::from(dir),
+            project_dependencies: deps.iter().map(|d| d.to_string()).collect(),
+            watch_files: vec![],
+            has_terraform_source: true,
+        }
+    }
+
+    #[test]
+    fn test_linkage_all_edges_resolved() {
+        let projects = vec![linkage_project("a", "/stack/a", &[]), linkage_project("b", "/stack/b", &["/stack/a"])];
+
+        let linkage = analyze_dependency_linkage(&projects);
+
+        assert_eq!(linkage.resolved, 1);
+        assert!(linkage.dangling.is_empty());
+        assert!(!linkage.is_fully_collapsed());
+    }
+
+    /// The #48 shape: every dependency names a module source rather than a
+    /// sibling unit, so layering has no edges and flattens to layer 0.
+    #[test]
+    fn test_linkage_detects_full_collapse() {
+        let projects = vec![
+            linkage_project("backends", "/stack/.terragrunt-stack/backends", &[]),
+            linkage_project("roles", "/stack/.terragrunt-stack/roles", &["/modules/vault/auth/backends"]),
+        ];
+
+        let linkage = analyze_dependency_linkage(&projects);
+
+        assert_eq!(linkage.resolved, 0);
+        assert_eq!(linkage.dangling.len(), 1);
+        assert_eq!(linkage.dangling[0].project, "roles");
+        assert_eq!(linkage.dangling[0].project_dir, "/stack/.terragrunt-stack/roles");
+        assert_eq!(linkage.dangling[0].target, "/modules/vault/auth/backends");
+        assert!(linkage.is_fully_collapsed());
+
+        // Confirms the collapse the guard is there to catch.
+        let layers = compute_layers(&projects, None);
+        assert_eq!(layers.get("roles"), Some(&0));
+    }
+
+    /// A filtered-out dependency target dangles legitimately, so a partially
+    /// linked graph must not trip the collapse guard.
+    #[test]
+    fn test_linkage_partial_is_not_collapse() {
+        let projects = vec![
+            linkage_project("a", "/stack/a", &[]),
+            linkage_project("b", "/stack/b", &["/stack/a"]),
+            linkage_project("c", "/stack/c", &["/stack/filtered-out"]),
+        ];
+
+        let linkage = analyze_dependency_linkage(&projects);
+
+        assert_eq!(linkage.resolved, 1);
+        assert_eq!(linkage.dangling.len(), 1);
+        assert!(!linkage.is_fully_collapsed());
+    }
+
+    #[test]
+    fn test_linkage_no_declared_dependencies_is_not_collapse() {
+        let projects = vec![linkage_project("a", "/stack/a", &[]), linkage_project("b", "/stack/b", &[])];
+
+        let linkage = analyze_dependency_linkage(&projects);
+
+        assert!(linkage.dangling.is_empty());
+        assert!(!linkage.is_fully_collapsed());
     }
 
     // ============== Layer Computation Tests ==============

@@ -1,6 +1,6 @@
 //! terragrunt-dag CLI - Generate dependency graph for terragrunt projects
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io;
 use std::process::ExitCode;
@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use terragrunt_dag::changes;
 use terragrunt_dag::cycle::{DependencyEdge, EdgeType, analyze_cycles, detect_cycles, report_cycles};
 use terragrunt_dag::discovery::discover_files;
-use terragrunt_dag::output::{OutputConfig, OutputFormat, generate_output};
+use terragrunt_dag::output::{OutputConfig, OutputFormat, analyze_dependency_linkage, generate_output};
 use terragrunt_dag::processor::{ParseCache, ProjectResult, process_all_projects};
 use terragrunt_dag::project::Project;
 use terragrunt_dag::stack;
@@ -302,6 +302,42 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         if cli.strict {
             return Err("Dependency cycles detected (use without --strict to generate output anyway)".into());
+        }
+    }
+
+    // Dependencies that match no emitted unit are dropped during layering, so
+    // the affected units land in layer 0 as if they were independent.
+    let linkage = analyze_dependency_linkage(&discovered.projects);
+    if !linkage.dangling.is_empty() {
+        if linkage.is_fully_collapsed() {
+            eprintln!(
+                "Warning: all {} declared dependencies point outside the emitted units; every unit will be reported as layer 0 with no ordering guarantee",
+                linkage.dangling.len()
+            );
+        } else if cli.verbose {
+            eprintln!(
+                "Warning: {} of {} declared dependencies point outside the emitted units",
+                linkage.dangling.len(),
+                linkage.dangling.len() + linkage.resolved
+            );
+        }
+
+        if cli.verbose || linkage.is_fully_collapsed() {
+            let rel = |p: &str| {
+                Utf8Path::new(p).strip_prefix(&discovered.root).map(|r| r.to_string()).unwrap_or_else(|_| p.to_string())
+            };
+            for d in linkage.dangling.iter().take(10) {
+                eprintln!("  {} -> {}", rel(&d.project_dir), rel(&d.target));
+            }
+            if linkage.dangling.len() > 10 {
+                eprintln!("  ... and {} more", linkage.dangling.len() - 10);
+            }
+        }
+
+        if cli.strict && linkage.is_fully_collapsed() {
+            return Err(
+                "No dependency edge links two emitted units (use without --strict to generate output anyway)".into()
+            );
         }
     }
 
