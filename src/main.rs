@@ -8,7 +8,9 @@ use std::process::ExitCode;
 use terragrunt_dag::changes;
 use terragrunt_dag::cycle::{DependencyEdge, EdgeType, analyze_cycles, detect_cycles, report_cycles};
 use terragrunt_dag::discovery::discover_files;
-use terragrunt_dag::output::{OutputConfig, OutputFormat, analyze_dependency_linkage, generate_output};
+use terragrunt_dag::output::{
+    OutputConfig, OutputFormat, analyze_dependency_linkage, generate_output, report_generated_projects,
+};
 use terragrunt_dag::processor::{ParseCache, ProjectResult, process_all_projects};
 use terragrunt_dag::project::Project;
 use terragrunt_dag::stack;
@@ -152,6 +154,29 @@ struct DiscoveredProjects {
     projects: Vec<Project>,
 }
 
+/// List the emitted projects on stderr so tools that consume stdout (Atlantis
+/// pre-workflow hooks, CI matrix steps) can still see what was generated.
+fn report_projects(discovered: &DiscoveredProjects) {
+    let report = report_generated_projects(&discovered.projects, &discovered.root);
+
+    eprintln!("Generated {} projects:", report.len());
+
+    let width = report.iter().map(|r| r.dir.len()).max().unwrap_or(0);
+    for entry in &report {
+        if entry.dependencies.is_empty() {
+            eprintln!("  {:<width$} (layer {})", entry.dir, entry.layer, width = width);
+        } else {
+            eprintln!(
+                "  {:<width$} (layer {}) <- {}",
+                entry.dir,
+                entry.layer,
+                entry.dependencies.join(", "),
+                width = width
+            );
+        }
+    }
+}
+
 fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::error::Error>> {
     let root = cli.root.clone().ok_or("Root directory is required")?;
 
@@ -285,6 +310,10 @@ fn discover_and_process(cli: &Cli) -> Result<DiscoveredProjects, Box<dyn std::er
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let discovered = discover_and_process(&cli)?;
     let format: OutputFormat = cli.format.clone().into();
+
+    if cli.verbose {
+        report_projects(&discovered);
+    }
 
     if discovered.projects.is_empty() {
         let config = build_output_config(&cli, &discovered.root, format)?;
