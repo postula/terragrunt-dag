@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-28
+
+### Fixed
+
+- Units from a `stack` block whose source lives elsewhere in the repo are now
+  materialized under the parent unit's `.terragrunt-stack/` tree instead of
+  under the sourced tree. Recursion previously derived the unit path from the
+  child stack file's own directory, so with root `live` a stack sourcing
+  `stacks/vault` emitted units at `stacks/vault/.terragrunt-stack/*` — outside
+  the requested root. Emitted paths change for these units, and they now stay
+  within the root by construction. ([#48])
+- Dependency targets for a stack unit resolve from where the unit
+  materializes rather than from the shared module directory. Before
+  `terragrunt stack generate` had run, a unit's `../backends` resolved to
+  `modules/vault/auth/backends` instead of the sibling unit, leaving no edge
+  between any two emitted units. Config is still read from the module, the
+  only place it exists pre-generation. ([#48])
+- Together these produced a matrix in which every unit was reported as
+  layer 0 while still declaring dependencies. Consumers that treat the layer
+  as an execution barrier ran dependents concurrently with their
+  dependencies, so a green run carried no ordering guarantee. ([#48])
+
+### Added
+
+- Dependencies that match no emitted unit are reported instead of being
+  silently dropped during layering. A graph in which no edge links two
+  emitted units warns by default and fails under `--strict`. It is a warning
+  rather than a hard error because `--filter` and `--gha-filter-unchanged`
+  legitimately drop dependency targets. ([#48])
+- `--verbose` now lists the generated projects on stderr with each unit's
+  layer and the dependencies it waits on, so tools that consume stdout
+  (Atlantis pre-workflow hooks, CI matrix steps) can see what was generated.
+  ([#19])
+
+### Security
+
+- `crossbeam-epoch` 0.9.20 resolves [RUSTSEC-2026-0204]: the `fmt::Pointer`
+  impl for `Atomic` and `Shared` dereferenced the underlying pointer, faulting
+  on null. Reached transitively through `rayon`.
+
+### Dependencies
+
+- Bumped `camino`, `clap`, `glob`, `hcl-rs`, `rayon`, `serde`, `serde_json`
+  and `thiserror`.
+- Bumped `actions/checkout` to v7.0.1, `actions-rust-lang/setup-rust-toolchain`
+  to v1.17.0, `softprops/action-gh-release` to v3.0.2 and
+  `EmbarkStudios/cargo-deny-action` to v2.1.1.
+- CI now passes `--locked`, so a `Cargo.lock` that no longer satisfies
+  `Cargo.toml` fails the build instead of being silently regenerated.
+
+[#19]: https://github.com/postula/terragrunt-dag/issues/19
+[#48]: https://github.com/postula/terragrunt-dag/issues/48
+[RUSTSEC-2026-0204]: https://rustsec.org/advisories/RUSTSEC-2026-0204
+[0.7.0]: https://github.com/postula/terragrunt-dag/releases/tag/v0.7.0
+
 ## [0.6.0] - 2026-05-31
 
 ### Added
