@@ -4,6 +4,11 @@ on:
     tags:
       - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to re-run the release for (e.g. v0.7.0)"
+        required: true
+        type: string
 env:
   CARGO_TERM_COLOR: always
 permissions:
@@ -16,14 +21,27 @@ jobs:
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
+      tag: ${{ steps.get_version.outputs.tag }}
     steps:
-      - name: Get version from tag
+      # A tag push supplies github.ref_name; a manual re-run supplies inputs.tag.
+      - name: Resolve tag and version
         id: get_version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          case "${TAG}" in
+            v*.*.*) ;;
+            *) echo "Expected a vX.Y.Z tag, got '${TAG}'" >&2; exit 1 ;;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          tag_name: ${{ steps.get_version.outputs.tag }}
           name: Release v${{ steps.get_version.outputs.version }}
           draft: false
           prerelease: false
@@ -68,6 +86,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -136,3 +156,55 @@ jobs:
           files: SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Publishing lives here rather than in a workflow keyed on `release:
+  # published`. Releases are created with GITHUB_TOKEN, and GitHub suppresses
+  # workflow triggers for events that token raises, so such a workflow never
+  # runs. Keeping it in this job graph also guarantees the crate is only
+  # published once every platform binary and the checksum file are in place.
+  publish-crate:
+    name: Publish to crates.io
+    needs: [create-release, checksums]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache: true
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "${TAG_VERSION}" != "${CRATE_VERSION}" ]; then
+            echo "Tag version (${TAG_VERSION}) does not match Cargo.toml version (${CRATE_VERSION})" >&2
+            exit 1
+          fi
+        env:
+          TAG_VERSION: ${{ needs.create-release.outputs.version }}
+        shell: bash
+      # Makes a re-run idempotent: crates.io rejects a duplicate version, which
+      # would otherwise fail the whole release.
+      - name: Check whether the version is already published
+        id: published
+        run: |
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'User-Agent: terragrunt-dag-release-workflow' \
+            "https://crates.io/api/v1/crates/terragrunt-dag/${TAG_VERSION}")"
+          if [ "${CODE}" = "200" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "terragrunt-dag ${TAG_VERSION} is already on crates.io; skipping publish"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          TAG_VERSION: ${{ needs.create-release.outputs.version }}
+        shell: bash
+      - name: Publish to crates.io
+        if: steps.published.outputs.already == 'false'
+        run: cargo publish --locked --token "${CRATES_IO_TOKEN}"
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
