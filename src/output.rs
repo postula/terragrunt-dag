@@ -8,6 +8,47 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// One emitted project, as shown in the `--verbose` report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedProject {
+    /// Directory relative to the scan root.
+    pub dir: String,
+    pub layer: u32,
+    /// Root-relative dependencies, restricted to targets that were emitted.
+    pub dependencies: Vec<String>,
+}
+
+/// Summarize the projects being emitted, ordered by layer then path.
+///
+/// Dependencies are filtered to the emitted set so the listing shows what
+/// layering actually ordered on rather than every declared edge. Callers that
+/// need the dropped edges use [`analyze_dependency_linkage`].
+pub fn report_generated_projects(projects: &[Project], root: &camino::Utf8Path) -> Vec<ReportedProject> {
+    let layers = compute_layers(projects, None);
+    let emitted: HashSet<&str> = projects.iter().map(|p| p.dir.as_str()).collect();
+
+    let rel =
+        |p: &str| camino::Utf8Path::new(p).strip_prefix(root).map(|r| r.to_string()).unwrap_or_else(|_| p.to_string());
+
+    let mut reported: Vec<ReportedProject> = projects
+        .iter()
+        .map(|p| {
+            let mut dependencies: Vec<String> =
+                p.project_dependencies.iter().filter(|d| emitted.contains(d.as_str())).map(|d| rel(d)).collect();
+            dependencies.sort();
+
+            ReportedProject {
+                dir: rel(p.dir.as_str()),
+                layer: layers.get(&p.name).copied().unwrap_or(0),
+                dependencies,
+            }
+        })
+        .collect();
+
+    reported.sort_by(|a, b| a.layer.cmp(&b.layer).then_with(|| a.dir.cmp(&b.dir)));
+    reported
+}
+
 /// A declared dependency that no emitted project occupies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DanglingDependency {
@@ -696,6 +737,7 @@ pub fn generate_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camino::Utf8Path;
 
     fn sample_projects() -> Vec<Project> {
         vec![
@@ -954,6 +996,52 @@ mod tests {
 
         let depends_on = &parsed["projects"][0]["depends_on"];
         assert!(depends_on.is_null() || depends_on.as_sequence().map(|s| s.is_empty()).unwrap_or(true));
+    }
+
+    // ============== Generated Project Report Tests ==============
+
+    #[test]
+    fn test_report_orders_by_layer_then_path() {
+        let projects = vec![
+            linkage_project("roles", "/root/vault/roles", &["/root/vault/backends", "/root/vault/policies"]),
+            linkage_project("policies", "/root/vault/policies", &[]),
+            linkage_project("backends", "/root/vault/backends", &[]),
+        ];
+
+        let report = report_generated_projects(&projects, Utf8Path::new("/root"));
+
+        let order: Vec<(&str, u32)> = report.iter().map(|r| (r.dir.as_str(), r.layer)).collect();
+        assert_eq!(order, vec![("vault/backends", 0), ("vault/policies", 0), ("vault/roles", 1)]);
+
+        // Paths are root-relative and dependencies sorted for stable output.
+        assert_eq!(report[2].dependencies, vec!["vault/backends", "vault/policies"]);
+    }
+
+    /// Dependencies dropped by layering must not appear as if they ordered
+    /// anything; `analyze_dependency_linkage` is what surfaces those.
+    #[test]
+    fn test_report_omits_dependencies_outside_the_emitted_set() {
+        let projects =
+            vec![linkage_project("roles", "/root/vault/roles", &["/modules/vault/backends", "/root/vault/policies"])];
+
+        let report = report_generated_projects(&projects, Utf8Path::new("/root"));
+
+        assert_eq!(report.len(), 1);
+        assert!(report[0].dependencies.is_empty(), "unexpected deps: {:?}", report[0].dependencies);
+    }
+
+    #[test]
+    fn test_report_keeps_absolute_path_outside_root() {
+        let projects = vec![linkage_project("stray", "/elsewhere/unit", &[])];
+
+        let report = report_generated_projects(&projects, Utf8Path::new("/root"));
+
+        assert_eq!(report[0].dir, "/elsewhere/unit");
+    }
+
+    #[test]
+    fn test_report_empty_project_set() {
+        assert!(report_generated_projects(&[], Utf8Path::new("/root")).is_empty());
     }
 
     // ============== Dependency Linkage Tests ==============
