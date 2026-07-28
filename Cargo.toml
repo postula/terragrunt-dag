@@ -4,7 +4,7 @@
   name = "benchmarks"
 
 [dependencies]
-  glob = "0.3.3"
+  glob = "0.3.4"
   hcl-rs = "0.19.6"
   rayon = "1.11.0"
   serde_json = "1.0.149"
