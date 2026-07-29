@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-07-29
+
+### Fixed
+
+- Stack files instantiated more than once now expand for every instantiation.
+  The guard that stops a leaf being emitted twice was keyed on
+  `(source, unit.path)`, which sibling `stack` blocks sourcing one shared stack
+  file share: the same `stacks/app/terragrunt.stack.hcl` referenced once per
+  environment resolves to the same source and declares the same path each time.
+  Only the first emitted its leaves. For the rest the recursion produced
+  nothing, so the parent shell was kept and every unit beneath it was missing
+  from the output. ([#61])
+
+  Emitted entries could therefore be directories that still contain a nested
+  `.terragrunt-stack/`. On the monorepo this surfaced on, 10 of 72 entries were
+  such shells, hiding 35 leaf directories, and which instantiation expanded
+  varied between runs on an identical tree. Consumers driving per-unit
+  validate or plan from `--format gha` were silently skipping roughly a third
+  of their units, with reruns covering a different subset.
+
+  The guard is now keyed on the materialized unit directory, which is unique
+  per instantiation. The original intent is preserved: a leaf reached through
+  both discovery and recursion still dedups, because it resolves to one
+  directory. Expect more units in the output than 0.7.2 produced.
+
+[#61]: https://github.com/postula/terragrunt-dag/issues/61
+[0.7.3]: https://github.com/postula/terragrunt-dag/releases/tag/v0.7.3
+
 ## [0.7.2] - 2026-07-29
 
 ### Fixed
