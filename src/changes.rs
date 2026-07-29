@@ -122,26 +122,61 @@ pub fn compute_changed_units(projects: &[Project], changed: &HashSet<PathBuf>, c
     changed_units
 }
 
-/// True if any changed path is inside `unit.dir`, matches a watch_file exactly,
-/// or lives under a directory-style watch entry (terraform module source).
-pub fn unit_is_changed(unit: &Project, changed: &HashSet<PathBuf>) -> bool {
-    let unit_dir = Path::new(unit.dir.as_str());
-    for f in changed {
-        if f.starts_with(unit_dir) {
-            return true;
-        }
-        for w in &unit.watch_files {
-            let w_path = Path::new(w.as_str());
-            if crate::output::looks_like_directory(w) {
-                if f.starts_with(w_path) {
-                    return true;
-                }
-            } else if f == w_path {
-                return true;
+/// How a single watch entry is compared against a changed path.
+///
+/// Watch entries arrive in three shapes and each needs a different test. Glob
+/// patterns must be recognized first: `looks_like_directory` keys off a `.` in
+/// the last component, so `.../**/*.tf*` would otherwise be classed as an exact
+/// file path and compared with `==` against a concrete path, which never holds.
+enum WatchMatcher {
+    Glob(glob::Pattern),
+    Dir(PathBuf),
+    Exact(PathBuf),
+}
+
+impl WatchMatcher {
+    fn compile(watch: &camino::Utf8PathBuf) -> Self {
+        let raw = watch.as_str();
+        if raw.contains(['*', '?', '[']) {
+            // An unparseable pattern falls through and is treated literally
+            // rather than silently matching nothing.
+            if let Ok(pattern) = glob::Pattern::new(raw) {
+                return WatchMatcher::Glob(pattern);
             }
         }
+        if crate::output::looks_like_directory(watch) {
+            WatchMatcher::Dir(PathBuf::from(raw))
+        } else {
+            WatchMatcher::Exact(PathBuf::from(raw))
+        }
     }
-    false
+
+    fn matches(&self, path: &Path) -> bool {
+        match self {
+            WatchMatcher::Glob(pattern) => pattern.matches_path(path),
+            WatchMatcher::Dir(dir) => path.starts_with(dir),
+            WatchMatcher::Exact(file) => path == file,
+        }
+    }
+}
+
+/// True if any changed path is inside `unit.dir`, matches a watch_file exactly,
+/// lives under a directory-style watch entry (terraform module source), or is
+/// matched by a glob watch entry.
+pub fn unit_is_changed(unit: &Project, changed: &HashSet<PathBuf>) -> bool {
+    let unit_dir = Path::new(unit.dir.as_str());
+    if changed.iter().any(|f| f.starts_with(unit_dir)) {
+        return true;
+    }
+
+    if unit.watch_files.is_empty() {
+        return false;
+    }
+
+    // Compile once per unit: this is on the hot path, and compiling per
+    // (changed file, watch entry) pair would be quadratic.
+    let matchers: Vec<WatchMatcher> = unit.watch_files.iter().map(WatchMatcher::compile).collect();
+    changed.iter().any(|f| matchers.iter().any(|m| m.matches(f)))
 }
 
 #[cfg(test)]
@@ -175,6 +210,66 @@ mod tests {
         changed.insert(PathBuf::from("/repo/root.hcl"));
 
         assert!(unit_is_changed(&unit, &changed));
+    }
+
+    #[test]
+    fn test_unit_is_changed_glob_watch_file_at_pattern_root() {
+        // The `**` has to match zero intermediate directories. This is the
+        // shape a stack unit gets for its own module source, and the case that
+        // made module edits invisible: `*.tf*` contains a dot, so the entry was
+        // classed as an exact path and compared with `==`.
+        let unit = project_with(
+            "/repo/live/.terragrunt-stack/apps/fdk/config",
+            vec!["/repo/modules/k8s/fdk_config/**/*.hcl", "/repo/modules/k8s/fdk_config/**/*.tf*"],
+        );
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/modules/k8s/fdk_config/variables.tf"));
+
+        assert!(unit_is_changed(&unit, &changed));
+    }
+
+    #[test]
+    fn test_unit_is_changed_glob_watch_file_nested() {
+        let unit = project_with("/repo/live/prod/vpc", vec!["/repo/modules/vpc/**/*.tf*"]);
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/modules/vpc/sub/main.tf"));
+
+        assert!(unit_is_changed(&unit, &changed));
+    }
+
+    #[test]
+    fn test_unit_is_changed_glob_watch_file_extension_respected() {
+        // `**/*.hcl` must not swallow a `.tf` sibling.
+        let unit = project_with("/repo/live/prod/vpc", vec!["/repo/modules/vpc/**/*.hcl"]);
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/modules/vpc/main.tf"));
+
+        assert!(!unit_is_changed(&unit, &changed));
+    }
+
+    #[test]
+    fn test_unit_not_changed_when_glob_points_elsewhere() {
+        let unit = project_with("/repo/live/prod/vpc", vec!["/repo/modules/vpc/**/*.tf*"]);
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/modules/other/main.tf"));
+
+        assert!(!unit_is_changed(&unit, &changed));
+    }
+
+    #[test]
+    fn test_unit_is_changed_malformed_glob_falls_back_to_literal() {
+        // An unparseable pattern must not match everything, and must still
+        // match itself literally.
+        let bad = "/repo/modules/vpc/[unclosed.tf";
+        let unit = project_with("/repo/live/prod/vpc", vec![bad]);
+
+        let mut unrelated = HashSet::new();
+        unrelated.insert(PathBuf::from("/repo/modules/vpc/main.tf"));
+        assert!(!unit_is_changed(&unit, &unrelated));
+
+        let mut literal = HashSet::new();
+        literal.insert(PathBuf::from(bad));
+        assert!(unit_is_changed(&unit, &literal));
     }
 
     #[test]
