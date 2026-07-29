@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-07-29
+
+### Fixed
+
+- Units reached through a `stack` block now watch every stack file on the path
+  to them, not just the innermost one. `build_synthetic_project` recorded a
+  single `stack_file`, and the recursion into a sourced stack replaced it with
+  the child, so ancestors were dropped. ([#63])
+
+  The consequence lands hardest on the layout a monorepo converges on: a root
+  `terragrunt.stack.hcl` that declares nothing but `stack` blocks, passing
+  shared configuration down through `values`. Every unit then watched some
+  `stacks/<x>/terragrunt.stack.hcl` and none watched the root, so the file
+  defining the inputs for the entire tree was watched by no unit at all. Under
+  `--gha-filter-unchanged` a diff confined to it produced an empty matrix:
+  consumers planned nothing and reported success. On the repository this
+  surfaced on, a change to the root stack file matched 0 of 107 units.
+
+  Expect more units than 0.7.3 retained, and note the new shape: because a
+  root stack file legitimately parameterizes everything beneath it, editing one
+  now flags every unit it reaches. That is a full-tree plan where there was
+  previously an empty one. Scoping it more tightly would mean diffing each
+  unit's evaluated `values` between the base and head commits, which this
+  release does not attempt.
+
+  Ancestry is per-path rather than accumulated globally, so sibling stacks
+  expanded during the same run do not leak into each other's watch lists.
+  Entries are canonicalized, matching what the recursion already passed for
+  child stacks, so a caller using the library API with a relative root no
+  longer contributes an unmatchable relative entry.
+
+[#63]: https://github.com/postula/terragrunt-dag/issues/63
+[0.7.4]: https://github.com/postula/terragrunt-dag/releases/tag/v0.7.4
+
 ## [0.7.3] - 2026-07-29
 
 ### Fixed
