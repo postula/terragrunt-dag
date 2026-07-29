@@ -239,7 +239,10 @@ struct ExpandState {
     /// Dedup key per emitted leaf: (canonical_source_module, unit.path).
     /// Prevents duplicates when discovery surfaces both the parent stack and
     /// its materialized `.terragrunt-stack/<x>/terragrunt.stack.hcl`.
-    emitted_leaves: HashSet<(Utf8PathBuf, String)>,
+    /// Canonical materialized unit directories already emitted, so the same
+    /// leaf reached twice is dropped without collapsing distinct instantiations
+    /// of a shared stack file.
+    emitted_leaves: HashSet<Utf8PathBuf>,
 }
 
 impl ExpandState {
@@ -431,8 +434,12 @@ fn expand_stack_file(
             }
         }
 
-        let leaf_key = (canonical_source.clone(), unit.path.clone());
-        if !state.emitted_leaves.insert(leaf_key) {
+        // Keyed on where the unit materializes, not on what it is sourced from.
+        // Sibling stacks instantiating one shared stack file share a source and
+        // a declared path but materialize to different directories, so keying
+        // on the source would emit only the first of them and leave the rest as
+        // unexpanded shells.
+        if !state.emitted_leaves.insert(canonical_unit_dir.clone()) {
             // Already emitted via another visit (e.g. discovery and recursion
             // both surfaced this leaf).
             continue;
