@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-07-29
+
+### Fixed
+
+- Change detection now matches glob watch patterns against changed paths.
+  `unit_is_changed` compared each watch entry using a directory prefix or exact
+  string equality, and the directory test keys off a `.` in the last component.
+  A pattern such as `modules/vpc/**/*.tf*` has last component `*.tf*`, so it was
+  classed as an exact file path and compared with `==` against a concrete path,
+  which never holds. Glob watch entries therefore matched nothing.
+
+  The failure was silent and partial. Watch entries that are exact file paths
+  still matched, so shared and stack-level edits were detected, while module
+  sources — which are watched only via globs — were invisible. Under
+  `--gha-filter-unchanged` a diff confined to module code produced an empty
+  matrix, so consumers validated nothing and reported success. Anyone relying
+  on that flag should expect more units to be retained now, which is the
+  intended behaviour rather than a regression. ([#59])
+
+  `**` matches zero intermediate directories, so `modules/x/**/*.tf*` matches
+  both `modules/x/variables.tf` and `modules/x/sub/main.tf`. A pattern the glob
+  parser rejects is treated as a literal path rather than matching everything.
+
+[#59]: https://github.com/postula/terragrunt-dag/issues/59
+[0.7.2]: https://github.com/postula/terragrunt-dag/releases/tag/v0.7.2
+
 ## [0.7.1] - 2026-07-29
 
 ### Fixed

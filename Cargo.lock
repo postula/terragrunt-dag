@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "terragrunt-dag"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "camino",
  "clap",
