@@ -220,3 +220,43 @@ fn recursive_stack_sources_emits_leaves_not_shells() {
         unseal.watch_files
     );
 }
+
+/// Several stack blocks may instantiate the same stack file, one per
+/// environment. Each materializes its own copy, so each must expand to its own
+/// leaves. Keying the emitted-leaf guard on the shared source instead of the
+/// materialized directory collapsed them: the first environment expanded and
+/// the rest were emitted as unexpanded shells.
+#[test]
+fn shared_stack_file_expands_once_per_instantiation() {
+    let (_tmp, root) = materialize_fixture_with_git_marker("stack/shared_stack_multiple_instances");
+    let live = root.join("live");
+
+    let gha = cargo_bin().args(["--format", "gha", live.as_str()]).output().expect("Failed to execute binary");
+    assert!(gha.status.success(), "gha binary failed: stderr={}", String::from_utf8_lossy(&gha.stderr));
+    let stdout = String::from_utf8_lossy(&gha.stdout);
+    let parsed: GhaOutput =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid GHA JSON: {}: {}", e, stdout));
+    let dirs: Vec<&String> = parsed.include.iter().map(|p| &p.working_directory).collect();
+
+    for env in ["dev", "staging", "prod"] {
+        for unit in ["api", "worker"] {
+            let suffix = format!("{}/.terragrunt-stack/{}", env, unit);
+            let count = parsed.include.iter().filter(|p| p.working_directory.ends_with(&suffix)).count();
+            assert_eq!(count, 1, "expected exactly one entry ending with {}; got: {:?}", suffix, dirs);
+        }
+    }
+
+    // No environment may survive as its own shell entry: a shell means its
+    // leaves were never emitted.
+    for env in ["dev", "staging", "prod"] {
+        let shell = format!("/.terragrunt-stack/{}", env);
+        assert!(
+            !parsed.include.iter().any(|p| p.working_directory.ends_with(&shell)),
+            "{} shell leaked into output, so its leaves are missing: {:?}",
+            env,
+            dirs
+        );
+    }
+
+    assert_eq!(parsed.include.len(), 6, "expected 3 environments x 2 units, got: {:?}", dirs);
+}
