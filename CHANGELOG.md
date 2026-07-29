@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-29
+
+### Fixed
+
+- `--gha-filter-unchanged` now assigns layers after filtering rather than
+  before, so the emitted layers are dense from 0. Units that survived the
+  filter previously kept their index from the unfiltered DAG, leaving gaps: a
+  changed sink stayed at its original layer with nothing below it. Consumers
+  that sequence jobs by layer waited on layers that had no work, and
+  `--max-layers` was measured against the unfiltered depth, so a single
+  changed layer-3 unit reported four buckets and could trip a cap even though
+  the real work was one layer deep. Layer numbers in filtered output change,
+  and dependencies on filtered-out units are ignored when layering, which is
+  the rule already applied to dependency paths that match no emitted unit.
+  ([#57])
+
+  Note for consumers with a fixed number of layer jobs: this makes empty
+  layers a suffix rather than scattered holes, but does not remove them. A
+  diff touching no unit still yields an empty result, as do layers beyond the
+  filtered depth. On runners that drop rather than skip a job whose matrix is
+  empty, such a layer can break a `needs:` chain.
+
+[#57]: https://github.com/postula/terragrunt-dag/issues/57
+[0.7.1]: https://github.com/postula/terragrunt-dag/releases/tag/v0.7.1
+
 ## [0.7.0] - 2026-07-28
 
 ### Fixed
