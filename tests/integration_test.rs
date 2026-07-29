@@ -260,3 +260,62 @@ fn shared_stack_file_expands_once_per_instantiation() {
 
     assert_eq!(parsed.include.len(), 6, "expected 3 environments x 2 units, got: {:?}", dirs);
 }
+
+/// A leaf reached through a `stack` block must watch every stack file on the
+/// path to it, not just the innermost one.
+///
+/// Only the immediate stack file was recorded, so a root stack file that
+/// declares nothing but `stack` blocks — the shape a monorepo converges on,
+/// where the root parameterizes every child via `values` — ended up watched by
+/// no unit at all. Editing it changed the configuration of the whole tree while
+/// `--gha-filter-unchanged` reported nothing to do.
+#[test]
+fn nested_stack_leaves_watch_every_ancestor_stack_file() {
+    let (_tmp, root) = materialize_fixture_with_git_marker("stack/recursive_stack_sources");
+    let live = root.join("live");
+
+    // Render relative to the repo root, not the scan root: watch entries are
+    // relativized against base_dir, and the stack files live on both sides of
+    // `live/`. Pinning it keeps the assertions readable.
+    let json = cargo_bin()
+        .args(["--format", "json", "--base-dir", root.as_str(), live.as_str()])
+        .output()
+        .expect("Failed to execute binary");
+    assert!(json.status.success(), "json binary failed: stderr={}", String::from_utf8_lossy(&json.stderr));
+    let stdout = String::from_utf8_lossy(&json.stdout);
+    let parsed: JsonOutput =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid JSON: {}: {}", e, stdout));
+
+    assert_eq!(parsed.projects.len(), 3, "fixture should yield 3 leaves");
+
+    // The root file declares only `stack` blocks, so before the fix no unit
+    // referenced it and a change to it matched nothing.
+    for project in &parsed.projects {
+        assert!(
+            project.watch_files.iter().any(|f| f == "live/terragrunt.stack.hcl"),
+            "{} must watch the root stack file that instantiates it; got: {:?}",
+            project.dir,
+            project.watch_files
+        );
+    }
+
+    // The innermost file is still watched: ancestors are added, not swapped in.
+    let agent = parsed
+        .projects
+        .iter()
+        .find(|p| p.dir.ends_with("consul/.terragrunt-stack/agent"))
+        .expect("consul agent leaf present");
+    assert!(
+        agent.watch_files.iter().any(|f| f == "stacks/consul/terragrunt.stack.hcl"),
+        "agent must still watch its own stack file; got: {:?}",
+        agent.watch_files
+    );
+
+    // Ancestry is per-path, not a global accumulation: the consul leaf must not
+    // pick up the sibling vault stack file just because it was expanded too.
+    assert!(
+        !agent.watch_files.iter().any(|f| f == "stacks/vault/terragrunt.stack.hcl"),
+        "agent must not watch a sibling stack it is unrelated to; got: {:?}",
+        agent.watch_files
+    );
+}
