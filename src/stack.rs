@@ -243,6 +243,15 @@ struct ExpandState {
     /// leaf reached twice is dropped without collapsing distinct instantiations
     /// of a shared stack file.
     emitted_leaves: HashSet<Utf8PathBuf>,
+    /// Stack files on the current expansion path, outermost first.
+    ///
+    /// A unit watches every one of them, not just the innermost. A `stack`
+    /// block passes `values = {...}` down to the stack file it sources, so an
+    /// edit to any ancestor can change the configuration a leaf is
+    /// instantiated with. Recording only the innermost file left the root
+    /// stack file — typically the one that parameterizes the whole repo —
+    /// watched by nothing.
+    ancestry: Vec<Utf8PathBuf>,
 }
 
 impl ExpandState {
@@ -255,6 +264,7 @@ impl ExpandState {
             file_io_seen: Rc::new(RefCell::new(HashSet::new())),
             visited: HashSet::new(),
             emitted_leaves: HashSet::new(),
+            ancestry: Vec::new(),
         }
     }
 }
@@ -286,12 +296,21 @@ fn expand_stack_file(
         state.eval_report.borrow_mut().cycle_skipped += 1;
         return;
     }
+    // Kept in lockstep with `visited`: pushed here, popped at every exit.
+    //
+    // Canonical rather than as-given, so ancestry entries are uniformly
+    // absolute. Recursion already passes a canonicalized child, and change
+    // detection compares watch entries against diff paths joined onto the git
+    // toplevel; a caller reaching `expand` directly with a relative root would
+    // otherwise contribute an entry that matches nothing.
+    state.ancestry.push(canonical_stack_file.clone());
 
     let parsed = match parse_stack_file_cached(stack_file, cache) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Warning: failed to parse stack file {}: {}", stack_file, e);
             state.visited.remove(&canonical_stack_file);
+            state.ancestry.pop();
             return;
         }
     };
@@ -301,6 +320,7 @@ fn expand_stack_file(
         None => {
             eprintln!("Warning: stack file has no parent directory: {}", stack_file);
             state.visited.remove(&canonical_stack_file);
+            state.ancestry.pop();
             return;
         }
     };
@@ -445,11 +465,12 @@ fn expand_stack_file(
             continue;
         }
 
-        let project = build_synthetic_project(&unit_dir, &canonical_source, stack_file, cache, bound_values);
+        let project = build_synthetic_project(&unit_dir, &canonical_source, &state.ancestry, cache, bound_values);
         state.synthetic_projects.push(project);
     }
 
     state.visited.remove(&canonical_stack_file);
+    state.ancestry.pop();
 }
 
 /// For top-level calls (depth 0) we infer `values` from any on-disk
@@ -524,16 +545,24 @@ fn try_recurse_into_child_stack(
 fn build_synthetic_project(
     unit_dir: &Utf8Path,
     source_module: &Utf8Path,
-    stack_file: &Utf8Path,
+    stack_ancestry: &[Utf8PathBuf],
     cache: &ParseCache,
     bound_values: Option<hcl::Value>,
 ) -> Project {
     let unit_hcl = unit_dir.join("terragrunt.hcl");
 
-    // Watch files always include the parent stack file and the shared module sources.
-    let stack_watch = stack_file.to_path_buf();
+    // Watch files always include the shared module sources plus every stack
+    // file on the path to this unit, not just the innermost one: each passes
+    // `values` down to the next, so an edit to any of them can change what
+    // this unit is instantiated with.
     let module_hcl_glob = source_module.join("**/*.hcl");
     let module_tf_glob = source_module.join("**/*.tf*");
+    let base_watches = || {
+        let mut w = stack_ancestry.to_vec();
+        w.push(module_hcl_glob.clone());
+        w.push(module_tf_glob.clone());
+        w
+    };
 
     let process_result = match bound_values.clone() {
         Some(values) if unit_hcl.exists() => process_project_with_deps_with_values(unit_dir, cache, true, values),
@@ -553,7 +582,7 @@ fn build_synthetic_project(
                     name: derive_project_name(unit_dir),
                     dir: unit_dir.to_path_buf(),
                     project_dependencies: Vec::new(),
-                    watch_files: vec![stack_watch, module_hcl_glob, module_tf_glob],
+                    watch_files: base_watches(),
                     has_terraform_source: true,
                 };
             }
@@ -563,7 +592,7 @@ fn build_synthetic_project(
     match process_result {
         Ok(mut project) => {
             project.has_terraform_source = true;
-            for extra in [stack_watch, module_hcl_glob, module_tf_glob] {
+            for extra in base_watches() {
                 if !project.watch_files.contains(&extra) {
                     project.watch_files.push(extra);
                 }
@@ -578,7 +607,7 @@ fn build_synthetic_project(
                 name: derive_project_name(unit_dir),
                 dir: unit_dir.to_path_buf(),
                 project_dependencies: Vec::new(),
-                watch_files: vec![stack_watch, module_hcl_glob, module_tf_glob],
+                watch_files: base_watches(),
                 has_terraform_source: true,
             }
         }
