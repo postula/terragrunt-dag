@@ -4,7 +4,7 @@ use crate::Project;
 use crate::changes::compute_changed_units;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -116,6 +116,18 @@ pub fn analyze_dependency_linkage(projects: &[Project]) -> DependencyLinkage {
 /// Dependencies in projects are absolute paths, so we need to convert them
 /// to names using base_dir before comparison.
 fn compute_layers(projects: &[Project], _base_dir: Option<&Utf8PathBuf>) -> HashMap<String, u32> {
+    let refs: Vec<&Project> = projects.iter().collect();
+    compute_layers_of(&refs)
+}
+
+/// Layer assignment over an arbitrary subset of projects.
+///
+/// Layers are always relative to the set passed in: dependencies on projects
+/// outside the set are ignored, exactly as [`compute_layers`] ignores paths it
+/// cannot map to a project. Callers that filter units out must use this so the
+/// surviving units are renumbered densely from 0 rather than keeping indices
+/// from the unfiltered DAG.
+fn compute_layers_of(projects: &[&Project]) -> HashMap<String, u32> {
     let mut layers: HashMap<String, u32> = HashMap::new();
 
     // Build a mapping from absolute path to project name
@@ -636,15 +648,24 @@ fn generate_digger(projects: &[Project], config: &OutputConfig) -> Result<String
 /// the unit name, working directory, derived dependency names, DAG layer, and
 /// a `changed` flag computed from `config.changed_files`.
 fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, OutputError> {
-    let layers = compute_layers(projects, config.base_dir.as_ref());
-
     // Compute changed set once. When `cascade_unchanged` is set, dependents of
     // changed units are pulled in via DAG-edge propagation; otherwise only the
     // directly-changed seed set is returned.
     let changed_units: Option<HashSet<String>> =
         config.changed_files.as_ref().map(|set| compute_changed_units(projects, set, config.cascade_unchanged));
 
-    let mut entries: Vec<GhaProject> = projects
+    // Drop unchanged units *before* assigning layers. Computing layers over the
+    // full DAG and filtering afterwards leaves gaps: a changed sink keeps its
+    // full-graph index and waits on layers that have no work left in them, and
+    // the `gha_max_layers` cap ends up measured against the unfiltered depth.
+    let retained: Vec<&Project> = match (config.gha_filter_unchanged, &changed_units) {
+        (true, Some(set)) => projects.iter().filter(|p| set.contains(p.dir.as_str())).collect(),
+        _ => projects.iter().collect(),
+    };
+
+    let layers = compute_layers_of(&retained);
+
+    let entries: Vec<GhaProject> = retained
         .iter()
         .map(|p| {
             let dir = make_relative(&p.dir, config.base_dir.as_deref());
@@ -672,33 +693,6 @@ fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, O
             }
         })
         .collect();
-
-    if config.gha_filter_unchanged {
-        let mut keep: HashSet<String> = entries.iter().filter(|e| e.changed).map(|e| e.name.clone()).collect();
-
-        if config.cascade_unchanged {
-            // Build reverse adjacency: dep_name -> {dependent names}.
-            let mut reverse: HashMap<String, Vec<String>> = HashMap::new();
-            for entry in &entries {
-                for dep in &entry.dependencies {
-                    reverse.entry(dep.clone()).or_default().push(entry.name.clone());
-                }
-            }
-
-            let mut queue: VecDeque<String> = keep.iter().cloned().collect();
-            while let Some(current) = queue.pop_front() {
-                if let Some(dependents) = reverse.get(&current) {
-                    for dependent in dependents {
-                        if keep.insert(dependent.clone()) {
-                            queue.push_back(dependent.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        entries.retain(|e| keep.contains(&e.name));
-    }
 
     if let Some(max) = config.gha_max_layers {
         // `needed` is the bucket count: max layer index + 1, or 0 if empty.
@@ -1957,6 +1951,123 @@ mod tests {
             parsed["include"].as_array().unwrap().iter().filter_map(|e| e["name"].as_str()).collect();
 
         assert_eq!(names, vec!["a"]);
+    }
+
+    #[test]
+    fn test_gha_filter_unchanged_renumbers_layers_densely() {
+        // `prod_app` is layer 1 in the full DAG because it depends on `prod_vpc`.
+        // Once `prod_vpc` is filtered out it is the only unit left, so it must be
+        // renumbered to layer 0 rather than keeping its full-graph index and
+        // waiting on an empty layer 0.
+        let projects = sample_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/live/prod/app/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            cascade_unchanged: false,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let entries = parsed["include"].as_array().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"].as_str(), Some("live_prod_app"));
+        assert_eq!(entries[0]["layer"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn test_gha_filter_unchanged_cascade_preserves_relative_order() {
+        // Diamond a -> {b, c} -> d. Change `b` and cascade: b and d survive,
+        // a and c are dropped. Layers must compact to 0/1 while keeping d after
+        // b, since d still depends on b.
+        let projects = diamond_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/b/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            cascade_unchanged: true,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let mut layers: Vec<(&str, u64)> = parsed["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap(), e["layer"].as_u64().unwrap()))
+            .collect();
+        layers.sort();
+
+        assert_eq!(layers, vec![("b", 0), ("d", 1)]);
+    }
+
+    #[test]
+    fn test_gha_max_layers_measured_after_filtering() {
+        // The full diamond spans 3 layer buckets, but filtering down to the sink
+        // `d` alone leaves a single bucket. The cap applies to the filtered
+        // depth, so max=1 must succeed here even though the unfiltered DAG
+        // would need 3.
+        let projects = diamond_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/d/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: true,
+            cascade_unchanged: false,
+            gha_max_layers: Some(1),
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let entries = parsed["include"].as_array().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"].as_str(), Some("d"));
+        assert_eq!(entries[0]["layer"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn test_gha_layers_unchanged_without_filtering() {
+        // Without `gha_filter_unchanged` every unit is still emitted, so layers
+        // must keep their full-DAG indices even when a diff marks most of them
+        // unchanged. Only filtering triggers renumbering.
+        let projects = diamond_projects();
+        let mut changed = HashSet::new();
+        changed.insert(PathBuf::from("/repo/d/terragrunt.hcl"));
+
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            changed_files: Some(changed),
+            gha_filter_unchanged: false,
+            cascade_unchanged: false,
+            ..Default::default()
+        };
+
+        let output = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        let mut layers: Vec<(&str, u64)> = parsed["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap(), e["layer"].as_u64().unwrap()))
+            .collect();
+        layers.sort();
+
+        assert_eq!(layers, vec![("a", 0), ("b", 1), ("c", 1), ("d", 2)]);
     }
 
     #[test]
