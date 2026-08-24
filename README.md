@@ -44,6 +44,8 @@ Options:
       --base-ref <REF>               Git ref to diff against for `gha` change detection (e.g., origin/main)
       --gha-filter-unchanged         Drop unchanged units from the `gha` matrix (honors --cascade-dependencies)
       --max-layers <N>               For `gha`: fail non-zero if the DAG needs more than N layer buckets
+      --max-units-per-layer <N>      For `gha`: split layers holding more than N matrix cells (default: 256, 0 disables)
+      --units-per-job <K>            For `gha`: pack K units into one matrix cell (default: 1)
 ```
 
 ## What it does
@@ -107,6 +109,38 @@ jobs:
 ```
 
 `dependencies` and `layer` let callers chain layered jobs via `needs:` instead of per-step `if:` filtering. `--base-ref` requires `git` on PATH (standard in CI); on git failure it warns to stderr and marks all units unchanged. Use `--max-layers <N>` to fail-fast when the DAG exceeds the number of layer-jobs your workflow has hardcoded.
+
+### Keeping a wide layer under the matrix cap
+
+GitHub Actions [caps a matrix at 256 jobs per workflow run](https://docs.github.com/en/actions/reference/limits), so a layer wider than that produces a matrix the consumer cannot expand. Units within a layer are mutually independent, so there are two safe ways to narrow one, and they cost different things:
+
+- `--units-per-job <K>` (default `1`) packs K units into one matrix cell. One job runs them back to back. Cell count drops, **depth does not change**.
+- `--max-units-per-layer <N>` (default `256`) splits a layer holding more than N cells into `ceil(cells/N)` consecutive layers. This adds a barrier per split and charges the extra depth against `--max-layers`.
+
+Batching is applied first, splitting to whatever is left over. Both chunk by sorted unit name, so a unit lands in the same cell across reruns; consumers keying caches or PR comments on position would otherwise see it move. `--max-layers` is measured after both.
+
+The difference on a real 913-unit tree with layer profile `[414, 238, 83, 67, 42, 40, 22, 7]`:
+
+| flags | depth | cells | widest layer |
+|---|---|---|---|
+| `--max-units-per-layer 0` (off) | 8 | 913 | 414 |
+| `--max-units-per-layer 256` | 9 | 913 | 256 |
+| `--max-units-per-layer 100` | 14 | 913 | 100 |
+| `--max-units-per-layer 256 --units-per-job 2` | 8 | 458 | 207 |
+| `--max-units-per-layer 100 --units-per-job 5` | 8 | 186 | 83 |
+
+Splitting alone at a cap of 100 costs six extra layers; batching gets under the same cap at the original depth. Splitting is the backstop for what batching cannot absorb.
+
+Because the documented cap is per *run* rather than per matrix, a workflow with several layer jobs may want a value below 256.
+
+At `--units-per-job 1` each entry describes one unit, as above. Above 1 a cell no longer maps to a single unit, so `working-directory` and `dependencies` are replaced by a `units` list and `name` becomes a job label:
+
+```json
+{"name": "live_prod_vpc (+2 more)", "layer": 0, "changed": true,
+ "units": [{"name": "live_prod_vpc", "working-directory": "live/prod/vpc", "dependencies": [], "changed": true}]}
+```
+
+The shape is decided by the flag, not per cell, so the matrix never has heterogeneous keys. A cell is `changed` if any unit in it is.
 
 A unit is marked changed if any of its own source files changed, and (with `--cascade-dependencies`, the default) the change is propagated to its downstream dependents through the DAG.
 

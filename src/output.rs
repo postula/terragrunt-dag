@@ -4,7 +4,7 @@ use crate::Project;
 use crate::changes::compute_changed_units;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -185,6 +185,68 @@ fn compute_layers_of(projects: &[&Project]) -> HashMap<String, u32> {
     layers
 }
 
+/// The units one matrix cell runs, paired with the layer the cell lands in.
+type LayerCell<'a> = (u32, Vec<&'a Project>);
+
+/// Group units into matrix cells and give each cell its final layer.
+///
+/// Both knobs exist because a layer wider than the matrix cap can be narrowed
+/// two ways, and they cost different things:
+///
+/// * `units_per_job` packs consecutive units of a layer into one cell. Cell
+///   count drops without depth changing: units sharing a layer are mutually
+///   independent, so one job can run them back to back.
+/// * `max_cells_per_layer` caps how many cells a layer may hold, splitting a
+///   wider layer into consecutive layers and shifting everything above it up.
+///   This adds a barrier per split, so it is applied second, to whatever
+///   `units_per_job` could not absorb. `0` disables splitting.
+///
+/// Splitting is always safe: [`compute_layers_of`] assigns a unit
+/// `max(dep layers) + 1`, so any partition of a layer into consecutive layers
+/// preserves every edge. It costs parallelism, never correctness.
+///
+/// Units are ordered by name before chunking, so the same input always yields
+/// the same cell assignment; consumers keying caches or PR comments on a unit's
+/// position would otherwise see it move between reruns.
+fn assign_cells<'a>(
+    retained: &[&'a Project],
+    layers: &HashMap<String, u32>,
+    units_per_job: u32,
+    max_cells_per_layer: u32,
+) -> Vec<LayerCell<'a>> {
+    let units_per_job = (units_per_job as usize).max(1);
+
+    let mut by_layer: BTreeMap<u32, Vec<&'a Project>> = BTreeMap::new();
+    for p in retained {
+        by_layer.entry(layers.get(&p.name).copied().unwrap_or(0)).or_default().push(p);
+    }
+
+    let mut assigned: Vec<LayerCell<'a>> = Vec::new();
+    let mut shift = 0u32;
+    for (layer, mut units) in by_layer {
+        units.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let cells: Vec<&[&'a Project]> = units.chunks(units_per_job).collect();
+        let per_layer = match max_cells_per_layer {
+            0 => cells.len().max(1),
+            n => n as usize,
+        };
+
+        for (offset, group) in cells.chunks(per_layer).enumerate() {
+            for cell in group {
+                assigned.push((layer + shift + offset as u32, cell.to_vec()));
+            }
+        }
+        shift += cells.len().div_ceil(per_layer) as u32 - 1;
+    }
+    assigned
+}
+
+/// Number of layer buckets a layer assignment needs: max index + 1, or 0 if empty.
+fn layer_depth(layers: &HashMap<String, u32>) -> u32 {
+    layers.values().max().map(|m| m + 1).unwrap_or(0)
+}
+
 /// Output format containing all discovered projects
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Output {
@@ -247,6 +309,12 @@ pub struct OutputConfig {
     /// Optional max layer count for --format gha. If Some(N), generate_gha errors
     /// if the DAG has any unit with layer >= N (i.e., needs more than N buckets).
     pub gha_max_layers: Option<u32>,
+    /// For `Gha` output: split layers holding more than this many matrix cells
+    /// into consecutive layers. `0` disables splitting.
+    pub gha_max_units_per_layer: u32,
+    /// For `Gha` output: units packed into one matrix cell. `1` emits one cell
+    /// per unit, the flat entry shape.
+    pub gha_units_per_job: u32,
 }
 
 impl Default for OutputConfig {
@@ -264,9 +332,14 @@ impl Default for OutputConfig {
             gha_filter_unchanged: false,
             cascade_unchanged: true,
             gha_max_layers: None,
+            gha_max_units_per_layer: DEFAULT_MAX_UNITS_PER_LAYER,
+            gha_units_per_job: 1,
         }
     }
 }
+
+/// GitHub Actions caps a matrix at 256 jobs per workflow run.
+pub const DEFAULT_MAX_UNITS_PER_LAYER: u32 = 256;
 
 #[derive(Error, Debug)]
 pub enum OutputError {
@@ -280,6 +353,14 @@ pub enum OutputError {
     MaxLayersExceeded {
         found: u32,
         max: u32,
+    },
+    #[error(
+        "DAG has {found} layers after splitting layers wider than {max_units_per_layer} units but --max-layers is {max}; add more layer-jobs to your workflow or raise --max-units-per-layer"
+    )]
+    MaxLayersExceededAfterSplit {
+        found: u32,
+        max: u32,
+        max_units_per_layer: u32,
     },
 }
 
@@ -368,13 +449,31 @@ struct GhaOutput {
     include: Vec<GhaProject>,
 }
 
+/// One matrix cell. With the default `--units-per-job 1` a cell is a single
+/// unit and carries `working-directory`/`dependencies` directly. Above 1 those
+/// scalars stop being meaningful, so every cell carries a `units` list instead
+/// and the two are omitted; the shape is decided by the flag, not per cell, so
+/// consumers never see a matrix with heterogeneous keys.
 #[derive(Serialize)]
 struct GhaProject {
+    name: String,
+    #[serde(rename = "working-directory", skip_serializing_if = "Option::is_none")]
+    working_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependencies: Option<Vec<String>>,
+    layer: u32,
+    changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    units: Option<Vec<GhaUnit>>,
+}
+
+/// One unit inside a batched cell.
+#[derive(Serialize)]
+struct GhaUnit {
     name: String,
     #[serde(rename = "working-directory")]
     working_directory: String,
     dependencies: Vec<String>,
-    layer: u32,
     changed: bool,
 }
 
@@ -665,44 +764,79 @@ fn generate_gha(projects: &[Project], config: &OutputConfig) -> Result<String, O
 
     let layers = compute_layers_of(&retained);
 
-    let entries: Vec<GhaProject> = retained
-        .iter()
-        .map(|p| {
-            let dir = make_relative(&p.dir, config.base_dir.as_deref());
-            let name = derive_name_from_dir(&dir);
+    // Batch and split before the `gha_max_layers` check: splitting adds depth,
+    // so a cap measured beforehand would pass and then emit more layers than
+    // the consumer has jobs for.
+    let depth_before_split = layer_depth(&layers);
+    let cells = assign_cells(&retained, &layers, config.gha_units_per_job, config.gha_max_units_per_layer);
+    let depth = cells.iter().map(|(layer, _)| *layer).max().map(|m| m + 1).unwrap_or(0);
 
-            let dependencies: Vec<String> = p
+    let describe = |p: &Project| {
+        let dir = make_relative(&p.dir, config.base_dir.as_deref());
+        GhaUnit {
+            name: derive_name_from_dir(&dir),
+            dependencies: p
                 .project_dependencies
                 .iter()
                 .map(|dep_path| dependency_path_to_name(dep_path, config.base_dir.as_deref()))
-                .collect();
+                .collect(),
+            changed: changed_units.as_ref().is_none_or(|set| set.contains(p.dir.as_str())),
+            working_directory: dir,
+        }
+    };
 
-            let layer = layers.get(&p.name).copied().unwrap_or(0);
+    let batched = config.gha_units_per_job > 1;
+    let entries: Vec<GhaProject> = cells
+        .into_iter()
+        .map(|(layer, units)| {
+            let mut described: Vec<GhaUnit> = units.iter().map(|p| describe(p)).collect();
+            let changed = described.iter().any(|u| u.changed);
 
-            let changed = match &changed_units {
-                Some(set) => set.contains(p.dir.as_str()),
-                None => true,
+            if !batched {
+                // One unit per cell: today's flat shape.
+                let only = described.remove(0);
+                return GhaProject {
+                    name: only.name,
+                    working_directory: Some(only.working_directory),
+                    dependencies: Some(only.dependencies),
+                    layer,
+                    changed,
+                    units: None,
+                };
+            }
+
+            // `name` is only a job label here; the units carry the real data.
+            let name = match described.as_slice() {
+                [only] => only.name.clone(),
+                [first, rest @ ..] => format!("{} (+{} more)", first.name, rest.len()),
+                [] => String::new(),
             };
-
             GhaProject {
                 name,
-                working_directory: dir,
-                dependencies,
+                working_directory: None,
+                dependencies: None,
                 layer,
                 changed,
+                units: Some(described),
             }
         })
         .collect();
 
-    if let Some(max) = config.gha_max_layers {
-        // `needed` is the bucket count: max layer index + 1, or 0 if empty.
-        let needed = entries.iter().map(|e| e.layer).max().map(|m| m + 1).unwrap_or(0);
-        if needed > max {
-            return Err(OutputError::MaxLayersExceeded {
-                found: needed,
+    if let Some(max) = config.gha_max_layers
+        && depth > max
+    {
+        return Err(if depth > depth_before_split {
+            OutputError::MaxLayersExceededAfterSplit {
+                found: depth,
                 max,
-            });
-        }
+                max_units_per_layer: config.gha_max_units_per_layer,
+            }
+        } else {
+            OutputError::MaxLayersExceeded {
+                found: depth,
+                max,
+            }
+        });
     }
 
     let output = GhaOutput {
@@ -2176,5 +2310,306 @@ mod tests {
             }
             other => panic!("expected MaxLayersExceeded {{ found: 3, max: 2 }}, got {:?}", other),
         }
+    }
+
+    // ============== GHA layer splitting tests ==============
+
+    fn unit(name: &str, deps: &[&str]) -> Project {
+        Project {
+            name: name.to_string(),
+            dir: Utf8PathBuf::from(format!("/repo/{}", name)),
+            project_dependencies: deps.iter().map(|d| format!("/repo/{}", d)).collect(),
+            watch_files: vec![],
+            has_terraform_source: true,
+        }
+    }
+
+    /// `n` mutually independent units, all in layer 0.
+    fn independent_units(n: usize) -> Vec<Project> {
+        (0..n).map(|i| unit(&format!("u{:04}", i), &[])).collect()
+    }
+
+    fn gha_config(max_units_per_layer: u32) -> OutputConfig {
+        OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            gha_max_units_per_layer: max_units_per_layer,
+            ..Default::default()
+        }
+    }
+
+    /// unit name -> layer, as emitted.
+    fn emitted_layers(projects: &[Project], config: &OutputConfig) -> HashMap<String, u32> {
+        let output = generate_output(projects, OutputFormat::Gha, config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        parsed["include"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["name"].as_str().unwrap().to_string(), e["layer"].as_u64().unwrap() as u32))
+            .collect()
+    }
+
+    fn layer_sizes(layers: &HashMap<String, u32>) -> BTreeMap<u32, usize> {
+        let mut sizes: BTreeMap<u32, usize> = BTreeMap::new();
+        for layer in layers.values() {
+            *sizes.entry(*layer).or_default() += 1;
+        }
+        sizes
+    }
+
+    #[test]
+    fn test_gha_splits_layer_over_cap() {
+        let projects = independent_units(3);
+
+        let layers = emitted_layers(&projects, &gha_config(2));
+
+        assert_eq!(layer_sizes(&layers), BTreeMap::from([(0, 2), (1, 1)]));
+    }
+
+    #[test]
+    fn test_gha_layer_exactly_at_cap_is_not_split() {
+        let projects = independent_units(2);
+
+        let layers = emitted_layers(&projects, &gha_config(2));
+
+        assert_eq!(layer_sizes(&layers), BTreeMap::from([(0, 2)]));
+    }
+
+    #[test]
+    fn test_gha_split_shifts_higher_layers() {
+        // a, b, c independent; d depends on a. Cap 2 splits layer 0 into two,
+        // so d must move from layer 1 to layer 2.
+        let projects = vec![unit("a", &[]), unit("b", &[]), unit("c", &[]), unit("d", &["a"])];
+
+        let layers = emitted_layers(&projects, &gha_config(2));
+
+        assert_eq!(layers["a"], 0);
+        assert_eq!(layers["b"], 0);
+        assert_eq!(layers["c"], 1);
+        assert_eq!(layers["d"], 2);
+    }
+
+    #[test]
+    fn test_gha_two_splits_compose() {
+        // Layer 0: a1..a3, layer 1: b, layer 2: c1..c3. Cap 2 splits layers 0 and 2.
+        let projects = vec![
+            unit("a1", &[]),
+            unit("a2", &[]),
+            unit("a3", &[]),
+            unit("b", &["a1"]),
+            unit("c1", &["b"]),
+            unit("c2", &["b"]),
+            unit("c3", &["b"]),
+        ];
+
+        let layers = emitted_layers(&projects, &gha_config(2));
+
+        assert_eq!(layers["a1"], 0);
+        assert_eq!(layers["a2"], 0);
+        assert_eq!(layers["a3"], 1);
+        assert_eq!(layers["b"], 2);
+        assert_eq!(layers["c1"], 3);
+        assert_eq!(layers["c2"], 3);
+        assert_eq!(layers["c3"], 4);
+        // No gaps between 0 and the deepest layer.
+        assert_eq!(layer_sizes(&layers).keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_gha_split_is_stable_across_runs() {
+        let projects = independent_units(50);
+        let config = gha_config(7);
+
+        let first = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let second = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_gha_max_layers_measured_after_splitting() {
+        // 5 independent units are 1 layer unsplit, 3 once split at cap 2.
+        let projects = independent_units(5);
+        let config = OutputConfig {
+            gha_max_layers: Some(2),
+            ..gha_config(2)
+        };
+
+        let result = generate_output(&projects, OutputFormat::Gha, &config);
+
+        match result {
+            Err(OutputError::MaxLayersExceededAfterSplit {
+                found,
+                max,
+                max_units_per_layer,
+            }) => {
+                assert_eq!(found, 3);
+                assert_eq!(max, 2);
+                assert_eq!(max_units_per_layer, 2);
+            }
+            other => panic!("expected MaxLayersExceededAfterSplit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_gha_default_cap_splits_wide_layer() {
+        let projects = independent_units(300);
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            ..Default::default()
+        };
+
+        let layers = emitted_layers(&projects, &config);
+
+        assert_eq!(layer_sizes(&layers), BTreeMap::from([(0, 256), (1, 44)]));
+    }
+
+    #[test]
+    fn test_gha_zero_cap_disables_splitting() {
+        let projects = independent_units(300);
+
+        let layers = emitted_layers(&projects, &gha_config(0));
+
+        assert_eq!(layer_sizes(&layers), BTreeMap::from([(0, 300)]));
+    }
+
+    // ============== GHA unit batching tests ==============
+
+    fn gha_output(projects: &[Project], config: &OutputConfig) -> serde_json::Value {
+        let output = generate_output(projects, OutputFormat::Gha, config).unwrap();
+        serde_json::from_str(&output).unwrap()
+    }
+
+    #[test]
+    fn test_gha_default_emits_flat_entries() {
+        // The default must not change the shape existing consumers parse.
+        let projects = vec![unit("a", &[])];
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            ..Default::default()
+        };
+
+        let entry = gha_output(&projects, &config)["include"][0].clone();
+
+        assert_eq!(entry["working-directory"], "a");
+        assert_eq!(entry["dependencies"], serde_json::json!([]));
+        assert!(entry.get("units").is_none(), "flat entries must not carry a units list");
+    }
+
+    #[test]
+    fn test_gha_batching_packs_units_into_cells() {
+        // 7 units in one layer at K=3 -> cells of 3, 3, 1.
+        let projects = independent_units(7);
+        let config = OutputConfig {
+            gha_units_per_job: 3,
+            ..gha_config(0)
+        };
+
+        let entries = gha_output(&projects, &config)["include"].as_array().unwrap().clone();
+
+        assert_eq!(entries.len(), 3);
+        let widths: Vec<usize> = entries.iter().map(|e| e["units"].as_array().unwrap().len()).collect();
+        assert_eq!(widths, vec![3, 3, 1]);
+        // Scalars stop being meaningful once a cell holds several units.
+        assert!(entries[0].get("working-directory").is_none());
+        assert!(entries[0].get("dependencies").is_none());
+        // Every unit is emitted exactly once, and each carries its own data.
+        let mut names: Vec<String> = entries
+            .iter()
+            .flat_map(|e| e["units"].as_array().unwrap())
+            .map(|u| u["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 7);
+        assert_eq!(entries[0]["units"][0]["working-directory"], "u0000");
+        // A single-unit cell is labelled by its unit; a fuller one says how many.
+        assert_eq!(entries[0]["name"], "u0000 (+2 more)");
+        assert_eq!(entries[2]["name"], "u0006");
+    }
+
+    #[test]
+    fn test_gha_batching_does_not_add_depth() {
+        // 300 units would split into 2 layers at the default cap; batching in
+        // pairs fits them in one, which is the whole point of the flag.
+        let projects = independent_units(300);
+        let config = OutputConfig {
+            base_dir: Some(Utf8PathBuf::from("/repo")),
+            gha_units_per_job: 2,
+            ..Default::default()
+        };
+
+        let entries = gha_output(&projects, &config)["include"].as_array().unwrap().clone();
+
+        assert_eq!(entries.len(), 150);
+        assert!(entries.iter().all(|e| e["layer"] == 0));
+    }
+
+    #[test]
+    fn test_gha_split_cap_counts_cells_not_units() {
+        // 10 units at K=2 is 5 cells; a 3-cell cap splits them into 3 + 2.
+        let projects = independent_units(10);
+        let config = OutputConfig {
+            gha_units_per_job: 2,
+            ..gha_config(3)
+        };
+
+        let entries = gha_output(&projects, &config)["include"].as_array().unwrap().clone();
+
+        let mut cells_per_layer: BTreeMap<u64, usize> = BTreeMap::new();
+        for e in &entries {
+            *cells_per_layer.entry(e["layer"].as_u64().unwrap()).or_default() += 1;
+        }
+        assert_eq!(cells_per_layer, BTreeMap::from([(0, 3), (1, 2)]));
+    }
+
+    #[test]
+    fn test_gha_batching_preserves_dependency_ordering() {
+        // d depends on a; batching must never put a dependency in the same or a
+        // later layer than its dependent.
+        let projects = vec![unit("a", &[]), unit("b", &[]), unit("c", &[]), unit("d", &["a"])];
+        let config = OutputConfig {
+            gha_units_per_job: 2,
+            ..gha_config(0)
+        };
+
+        let entries = gha_output(&projects, &config)["include"].as_array().unwrap().clone();
+
+        let mut layer_of: HashMap<String, u64> = HashMap::new();
+        for e in &entries {
+            for u in e["units"].as_array().unwrap() {
+                layer_of.insert(u["name"].as_str().unwrap().to_string(), e["layer"].as_u64().unwrap());
+            }
+        }
+        assert!(layer_of["a"] < layer_of["d"], "a={} d={}", layer_of["a"], layer_of["d"]);
+    }
+
+    #[test]
+    fn test_gha_batched_cell_is_changed_if_any_unit_changed() {
+        let projects = vec![unit("a", &[]), unit("b", &[])];
+        let config = OutputConfig {
+            gha_units_per_job: 2,
+            changed_files: Some(HashSet::from([PathBuf::from("/repo/b/terragrunt.hcl")])),
+            ..gha_config(0)
+        };
+
+        let entry = gha_output(&projects, &config)["include"][0].clone();
+
+        assert_eq!(entry["changed"], true, "cell holding a changed unit must be changed");
+        assert_eq!(entry["units"][0]["changed"], false);
+        assert_eq!(entry["units"][1]["changed"], true);
+    }
+
+    #[test]
+    fn test_gha_batching_is_stable_across_runs() {
+        let projects = independent_units(50);
+        let config = OutputConfig {
+            gha_units_per_job: 7,
+            ..gha_config(4)
+        };
+
+        let first = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+        let second = generate_output(&projects, OutputFormat::Gha, &config).unwrap();
+
+        assert_eq!(first, second);
     }
 }

@@ -94,6 +94,21 @@ struct Cli {
     /// (A DAG with max layer index L requires L+1 buckets.)
     #[arg(long, global = true)]
     max_layers: Option<u32>,
+
+    /// For --format gha: maximum matrix cells emitted in a single DAG layer (with
+    /// the default --units-per-job 1, one cell is one unit). Wider layers are split
+    /// into consecutive layers, trading parallelism for a matrix the consumer can
+    /// expand. GitHub Actions caps a matrix at 256 jobs per workflow run, so a
+    /// workflow with several layer jobs wants a lower value. 0 disables splitting.
+    #[arg(long, global = true, default_value_t = terragrunt_dag::output::DEFAULT_MAX_UNITS_PER_LAYER)]
+    max_units_per_layer: u32,
+
+    /// For --format gha: units packed into a single matrix cell. Units in a layer are
+    /// mutually independent, so one job can run several back to back; this narrows a
+    /// wide layer without adding depth, unlike --max-units-per-layer. Above 1, entries
+    /// carry a `units` list instead of a scalar `working-directory`.
+    #[arg(long, global = true, default_value_t = 1)]
+    units_per_job: u32,
 }
 
 #[derive(Subcommand)]
@@ -407,6 +422,15 @@ fn build_output_config(
         if cli.max_layers.is_some() {
             eprintln!("Warning: --max-layers is ignored for --format {} (only used by --format gha)", format_name);
         }
+        if cli.max_units_per_layer != terragrunt_dag::output::DEFAULT_MAX_UNITS_PER_LAYER {
+            eprintln!(
+                "Warning: --max-units-per-layer is ignored for --format {} (only used by --format gha)",
+                format_name
+            );
+        }
+        if cli.units_per_job != 1 {
+            eprintln!("Warning: --units-per-job is ignored for --format {} (only used by --format gha)", format_name);
+        }
     }
 
     // Resolve the git diff only for --format gha when --base-ref is provided.
@@ -443,6 +467,8 @@ fn build_output_config(
         gha_filter_unchanged: cli.gha_filter_unchanged,
         cascade_unchanged: cli.cascade_dependencies,
         gha_max_layers: cli.max_layers,
+        gha_max_units_per_layer: cli.max_units_per_layer,
+        gha_units_per_job: cli.units_per_job,
     })
 }
 
