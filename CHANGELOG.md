@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-24
 
 ### Added
 
@@ -50,7 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the filesystem. Consumers that slice the matrix by `layer` are
   unaffected; one relying on the array's previous order is not.
 
+- `thiserror` to 2.0.20. ([#69])
+
 [#67]: https://github.com/postula/terragrunt-dag/issues/67
+[#69]: https://github.com/postula/terragrunt-dag/pull/69
+[0.8.0]: https://github.com/postula/terragrunt-dag/releases/tag/v0.8.0
 
 ## [0.7.4] - 2026-07-29
 
