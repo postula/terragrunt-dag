@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--max-units-per-layer <N>` (default `256`) for `--format gha`. GitHub Actions
+  caps a matrix at 256 jobs per workflow run, so a layer wider than that emitted
+  a matrix the consumer could not expand and there was no knob to trade
+  parallelism for width. Layers wider than `N` are now split into `ceil(n/N)`
+  consecutive layers and every layer above is shifted up. Units sharing a layer
+  are mutually independent by construction, so splitting one preserves every
+  edge; chunking is by sorted unit name so a unit keeps its cell across reruns.
+  `0` disables splitting. ([#67])
+
+  `--max-layers` is now measured against the post-split depth, and reports
+  `MaxLayersExceededAfterSplit` when splitting is what pushed the DAG over the
+  cap, so the consumer knows whether to add layer jobs or raise
+  `--max-units-per-layer`. A DAG that fit `--max-layers` before this release may
+  now exceed it.
+
+- `--units-per-job <K>` (default `1`) for `--format gha`, packing K units into
+  one matrix cell. Units sharing a layer are mutually independent, so one job
+  can run several back to back; this narrows a wide layer without adding depth,
+  which splitting cannot do. On the 913-unit tree with profile
+  `[414, 238, 83, 67, 42, 40, 22, 7]`, splitting alone at a cap of 100 costs six
+  extra layers (8 to 14), while `--units-per-job 5` gets under the same cap at
+  the original depth of 8, with 186 cells instead of 913.
+
+  Batching is applied before splitting, and `--max-units-per-layer` now counts
+  matrix cells rather than raw units. At the default `--units-per-job 1` a cell
+  is a unit, so the two are the same number and nothing changes.
+
+  At `K > 1` the entry shape changes: a cell no longer maps to one unit, so
+  `working-directory` and `dependencies` are replaced by a `units` list and
+  `name` becomes a job label. The shape follows the flag rather than the cell,
+  so a matrix never mixes both forms. At the default `K = 1` the entry shape is
+  untouched.
+
+### Changed
+
+- `--format gha` now orders the `include` array by layer, then unit name.
+  Entry contents are unchanged; only their position in the array moves.
+  Previously the order followed discovery, which interleaved layers and varied
+  with the filesystem. Consumers that slice the matrix by `layer` are
+  unaffected; one relying on the array's previous order is not.
+
+[#67]: https://github.com/postula/terragrunt-dag/issues/67
+
 ## [0.7.4] - 2026-07-29
 
 ### Fixed
