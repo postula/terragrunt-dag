@@ -19,7 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           cache: true
       - name: Build release binary
@@ -30,7 +30,6 @@ jobs:
           name: terragrunt-dag-bin
           path: target/release/terragrunt-dag
           retention-days: 1
-
   plan-matrix:
     name: Generate matrix from terragrunt DAG
     needs: build
@@ -88,7 +87,6 @@ jobs:
             SLICE=$(echo "$MATRIX" | jq -c --argjson L "$L" '{include: [.include[] | select(.layer == $L)]}')
             echo "layer_$L=$SLICE" >> "$GITHUB_OUTPUT"
           done
-
   # ---------------------------------------------------------------------------
   # Ideal pattern (NOT supported by GitHub Actions):
   #
@@ -129,7 +127,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-1:
     name: "Fake plan (layer 1) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-0]
@@ -147,7 +144,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-2:
     name: "Fake plan (layer 2) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-1]
@@ -165,7 +161,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-3:
     name: "Fake plan (layer 3) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-2]
@@ -183,7 +178,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-4:
     name: "Fake plan (layer 4) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-3]
@@ -201,7 +195,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-5:
     name: "Fake plan (layer 5) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-4]
@@ -219,7 +212,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-6:
     name: "Fake plan (layer 6) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-5]
@@ -237,7 +229,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-7:
     name: "Fake plan (layer 7) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-6]
@@ -255,7 +246,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-8:
     name: "Fake plan (layer 8) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-7]
@@ -273,7 +263,6 @@ jobs:
           echo "  unit:         ${{ matrix.name }}"
           echo "  layer:        ${{ matrix.layer }}"
           echo "  dependencies: ${{ join(matrix.dependencies, ', ') }}"
-
   fake-plan-layer-9:
     name: "Fake plan (layer 9) - ${{ matrix.name }}"
     needs: [plan-matrix, fake-plan-layer-8]
